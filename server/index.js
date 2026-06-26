@@ -75,6 +75,7 @@ const { startPeriodicFlush } = require('./services/dbWriter');
 
 const apiRoutes = require('./routes/api');
 const sessionRoutes = require('./routes/session');
+const adminRoutes = require('./routes/admin');
 
 // Setup Socket.io
 const io = new Server(server, {
@@ -110,6 +111,7 @@ setupSocketHandlers(io);
 
 app.use('/api', apiRoutes);
 app.use('/api/session', sessionRoutes);
+app.use('/api/admin', adminRoutes);
 
 app.get('/', (req, res) => {
     res.send('IPL Auction Server API is running');
@@ -134,7 +136,7 @@ const PlayerCache = require('./utils/PlayerCache');
 // Memory Monitoring (Lightweight)
 setInterval(() => {
     const mem = process.memoryUsage();
-    console.log(`[SYS] RAM: ${Math.round(mem.rss / 1024 / 1024)}MB | Rooms: ${require('./core/RoomManager').getAllRooms().length}`);
+    console.log(`[SYS] RAM: ${Math.round(mem.rss / 1024 / 1024)}MB`);
 }, 60000);
 
 // Invoke startServer

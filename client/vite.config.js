@@ -7,7 +7,7 @@ export default defineConfig({
     server: {
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:5050',
+        target: 'http://127.0.0.1:5001',
         changeOrigin: true,
         timeout: 60000,
         proxyTimeout: 60000,
@@ -18,7 +18,7 @@ export default defineConfig({
         }
       },
       '/socket.io': {
-        target: 'http://127.0.0.1:5050',
+        target: 'http://127.0.0.1:5001',
         ws: true,
         changeOrigin: true,
         rewriteWsOrigin: true,

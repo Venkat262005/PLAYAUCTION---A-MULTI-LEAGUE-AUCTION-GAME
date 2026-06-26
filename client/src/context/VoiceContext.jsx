@@ -8,12 +8,21 @@ export const useVoice = () => useContext(VoiceContext);
 export const VoiceProvider = ({ children }) => {
     const { socket } = useSocket();
     const [isJoined, setIsJoined] = useState(false);
-    const [isMuted, setIsMuted] = useState(false);
+    const [isMuted, setIsMuted] = useState(true);
+    const [isSpeakerOn, setIsSpeakerOn] = useState(true);
     const [voiceParticipants, setVoiceParticipants] = useState(new Set()); 
     
     // We strictly use refs for real WebRTC object management to avoid re-render cycles
     const localStreamRef = useRef(null);
     const peersRef = useRef(new Map()); // socketId -> RTCPeerConnection
+    const isSpeakerOnRef = useRef(true);
+
+    const applySpeakerToRemoteAudio = useCallback((enabled) => {
+        document.querySelectorAll('audio[id^="remote-audio-"]').forEach((audio) => {
+            audio.muted = !enabled;
+            audio.volume = enabled ? 1 : 0;
+        });
+    }, []);
 
     const configuration = {
         iceServers: [
@@ -61,7 +70,9 @@ export const VoiceProvider = ({ children }) => {
             localStreamRef.current = null;
         }
         setIsJoined(false);
-        setIsMuted(false);
+        setIsMuted(true);
+        setIsSpeakerOn(true);
+        isSpeakerOnRef.current = true;
         setVoiceParticipants(new Set());
     }, []);
 
@@ -101,6 +112,8 @@ export const VoiceProvider = ({ children }) => {
                 document.body.appendChild(audio);
             }
             audio.srcObject = event.streams[0];
+            audio.muted = !isSpeakerOnRef.current;
+            audio.volume = isSpeakerOnRef.current ? 1 : 0;
         };
 
         pc.oniceconnectionstatechange = () => {
@@ -119,8 +132,12 @@ export const VoiceProvider = ({ children }) => {
             console.log(`[VOICE] Requesting microphone access for room ${roomCode}...`);
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             localStreamRef.current = stream;
+            // Start listen-only: speaker on, mic off (Free Fire style)
+            stream.getAudioTracks().forEach((track) => { track.enabled = false; });
             setIsJoined(true);
-            setIsMuted(false);
+            setIsMuted(true);
+            setIsSpeakerOn(true);
+            isSpeakerOnRef.current = true;
 
             socket.emit('voice-join', { roomCode });
             console.log(`[VOICE] Successfully joined voice session`);
@@ -147,6 +164,16 @@ export const VoiceProvider = ({ children }) => {
             console.log(`[VOICE] Local mic ${newMuted ? 'MUTED' : 'UNMUTED'}`);
         }
     }, [isMuted]);
+
+    const toggleSpeaker = useCallback(() => {
+        setIsSpeakerOn((prev) => {
+            const next = !prev;
+            isSpeakerOnRef.current = next;
+            applySpeakerToRemoteAudio(next);
+            console.log(`[VOICE] Speaker ${next ? 'ON' : 'OFF'}`);
+            return next;
+        });
+    }, [applySpeakerToRemoteAudio]);
 
     useEffect(() => {
         if (!socket) return;
@@ -230,9 +257,11 @@ export const VoiceProvider = ({ children }) => {
         <VoiceContext.Provider value={{
             isJoined,
             isMuted,
+            isSpeakerOn,
             joinVoice,
             leaveVoice,
             toggleMute,
+            toggleSpeaker,
             voiceParticipants
         }}>
             {children}

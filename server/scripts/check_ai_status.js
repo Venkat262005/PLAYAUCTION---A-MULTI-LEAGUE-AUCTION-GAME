@@ -10,8 +10,8 @@ async function checkStatus() {
     console.log('\n🔍 --- AI PROVIDER STATUS CHECK ---\n');
 
     // 1. Gemini
-    const geminiKey = process.env.GEMINI_API_KEY;
-    const geminiModel = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+    const geminiKey = process.env.GOOGLE_API_KEY || process.env.GOOGLE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
     if (geminiKey) {
         try {
             console.log(`[Gemini] Testing ${geminiModel}...`);

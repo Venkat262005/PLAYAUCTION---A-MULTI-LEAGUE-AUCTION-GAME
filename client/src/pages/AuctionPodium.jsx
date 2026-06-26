@@ -15,8 +15,10 @@ import {
     useSpring,
     useTransform,
 } from "framer-motion";
-import { Users, Layout, MessageSquare, Play, Pause, Square, ListChecks, AlertTriangle, Settings, Plane, X, SkipForward, FastForward, Mic, MicOff, Phone, PhoneOff, Volume2, VolumeX, Check, ThumbsUp } from 'lucide-react';
+import { Users, Layout, MessageSquare, Play, Pause, Square, ListChecks, AlertTriangle, Settings, Plane, X, SkipForward, FastForward, Check, ThumbsUp } from 'lucide-react';
 import { useVoice } from "../context/VoiceContext";
+import VoiceControls from "../components/VoiceControls";
+import FullscreenToggle from "../components/immersive/FullscreenToggle";
 import GavelSlam from "../components/GavelSlam";
 import {
     TeamList,
@@ -26,143 +28,10 @@ import {
 import Toast from "../components/Toast";
 
 import { playBidSound, playWarningBeep, playLegendIntro, stopLegendIntro } from "../utils/soundEngine";
-import { getFlagUrl, getRoleDisplayName, fmtCr } from "../utils/playerUtils";
-
-const LEGEND_METADATA = {
-    "Virat Kohli": {
-        title: "THE KING",
-        subtitle: "Modern Day Legend",
-        color: "from-red-600 via-yellow-500 to-red-600",
-        aura: "rgba(255, 61, 61, 0.4)",
-        accent: "#FFD700"
-    },
-    "MS Dhoni": {
-        title: "THALA",
-        subtitle: "The Captain Cool",
-        color: "from-yellow-400 via-blue-800 to-yellow-400",
-        aura: "rgba(255, 215, 0, 0.4)",
-        accent: "#FFD700"
-    },
-    "Rohit Sharma": {
-        title: "THE HITMAN",
-        subtitle: "Captain of Champions",
-        color: "from-blue-600 via-white to-blue-600",
-        aura: "rgba(0, 75, 160, 0.4)",
-        accent: "#FFFFFF"
-    },
-    "AB de Villiers": {
-        title: "MR. 360",
-        subtitle: "Genius of Modern Cricket",
-        color: "from-red-600 via-black to-red-600",
-        aura: "rgba(239, 68, 68, 0.4)",
-        accent: "#FFD700"
-    },
-    "Suresh Raina": {
-        title: "MR. IPL",
-        subtitle: "The Heart of CSK",
-        color: "from-yellow-400 via-yellow-600 to-yellow-400",
-        aura: "rgba(234, 179, 8, 0.4)",
-        accent: "#FFD700"
-    },
-    "David Warner": {
-        title: "THE WARRIOR",
-        subtitle: "Bull from the Bullring",
-        color: "from-orange-500 via-black to-orange-600",
-        aura: "rgba(249, 115, 22, 0.4)",
-        accent: "#FFA500"
-    },
-    "Chris Gayle": {
-        title: "UNIVERSE BOSS",
-        subtitle: "King of the T20 Format",
-        color: "from-red-700 via-yellow-500 to-red-700",
-        aura: "rgba(185, 28, 28, 0.4)",
-        accent: "#FFD700"
-    },
-    "Jasprit Bumrah": {
-        title: "BOOM BOOM",
-        subtitle: "The Greatest in the World",
-        color: "from-blue-700 via-yellow-400 to-blue-700",
-        aura: "rgba(29, 78, 216, 0.4)",
-        accent: "#60A5FA"
-    },
-    "Bhuvneshwar Kumar": {
-        title: "SWING KING",
-        subtitle: "The Artist of Swing",
-        color: "from-orange-400 via-blue-900 to-orange-400",
-        aura: "rgba(251, 146, 60, 0.4)",
-        accent: "#FDBA74"
-    },
-    "Lasith Malinga": {
-        title: "THE SLINGER",
-        subtitle: "God of Death Overs",
-        color: "from-blue-600 via-yellow-500 to-blue-600",
-        aura: "rgba(37, 99, 235, 0.4)",
-        accent: "#EAB308"
-    },
-    "Yuzvendra Chahal": {
-        title: "YUZI",
-        subtitle: "The Smart Spinner",
-        color: "from-pink-500 via-blue-600 to-pink-500",
-        aura: "rgba(236, 72, 153, 0.4)",
-        accent: "#F472B6"
-    },
-    "Dale Steyn": {
-        title: "STEYN GUN",
-        subtitle: "Precision in Pace",
-        color: "from-red-600 via-gray-800 to-red-600",
-        aura: "rgba(220, 38, 38, 0.4)",
-        accent: "#9CA3AF"
-    },
-    "Hardik Pandya": {
-        title: "KUNG FU PANDYA",
-        subtitle: "The Ultimate All-Rounder",
-        color: "from-blue-900 via-yellow-500 to-blue-900",
-        aura: "rgba(30, 58, 138, 0.4)",
-        accent: "#EAB308"
-    },
-    "Ravindra Jadeja": {
-        title: "SIR JADEJA",
-        subtitle: "The Dynamic 3-D Legend",
-        color: "from-yellow-400 via-green-800 to-yellow-400",
-        aura: "rgba(234, 179, 8, 0.4)",
-        accent: "#FFD700"
-    },
-    "Kieron Pollard": {
-        title: "POLLY",
-        subtitle: "The Powerful Finisher",
-        color: "from-blue-800 via-yellow-600 to-blue-800",
-        aura: "rgba(30, 64, 175, 0.4)",
-        accent: "#FFD700"
-    },
-    "Andre Russell": {
-        title: "DRE RUSS",
-        subtitle: "Muscle of Muscle",
-        color: "from-purple-700 via-yellow-500 to-purple-700",
-        aura: "rgba(126, 34, 206, 0.4)",
-        accent: "#EAB308"
-    },
-    "Dwayne Bravo": {
-        title: "CHAMPION",
-        subtitle: "The Showman",
-        color: "from-yellow-400 via-blue-700 to-yellow-400",
-        aura: "rgba(234, 179, 8, 0.4)",
-        accent: "#FFD700"
-    },
-    "Sachin Tendulkar": {
-        title: "GOD OF CRICKET",
-        subtitle: "The Ultimate Legend",
-        color: "from-blue-600 via-orange-500 to-blue-600",
-        aura: "rgba(37, 99, 235, 0.4)",
-        accent: "#FFFFFF"
-    },
-    "Virender Sehwag": {
-        title: "NAWAB OF NAJAFGARH",
-        subtitle: "The Boundary Master",
-        color: "from-blue-800 via-red-600 to-blue-800",
-        aura: "rgba(30, 64, 175, 0.4)",
-        accent: "#F87171"
-    }
-};
+import { getFlagUrl, getRoleDisplayName, fmtCr, LEAGUE_DEFAULTS, resolvePlayerImageUrl, getPlayerImageFallback } from "../utils/playerUtils";
+import { getLegendMetadata, isLegendPlayer } from "../utils/legendConfig";
+import { getMinIncrement, getNextBidAmount } from "../utils/bidRules";
+import { resolveTeamShort } from "../utils/teamSlogans";
 
 const AuctionPodium = () => {
     const { roomCode } = useParams();
@@ -178,7 +47,7 @@ const AuctionPodium = () => {
     // If user joined as a spectator (passed via navigate state), keep them in spectator mode
     const forceSpectator = location.state?.isSpectator === true;
     const { playerName, userId, isReady: isSessionReady } = useSession();
-    const { isJoined: isVoiceJoined, isMuted: isVoiceMuted, joinVoice, leaveVoice, toggleMute, voiceParticipants } = useVoice();
+    const { isJoined: isVoiceJoined, leaveVoice, voiceParticipants } = useVoice();
     const [currentPlayer, setCurrentPlayer] = useState(null);
     const currentPlayerRef = useRef(null); // Needed for safety-net sync timeouts
     const bidWarSentRef = useRef(false); // Fires bidding_war chat alert only once per player
@@ -189,16 +58,38 @@ const AuctionPodium = () => {
         teamColor: null,
     });
     const [timer, setTimer] = useState(10);
-    const [myTeam, setMyTeam] = useState(null);
     const [soldEvent, setSoldEvent] = useState(null);
     const [isPaused, setIsPaused] = useState(false);
+    const [rtmState, setRtmState] = useState(null);
+    const fmt = useCallback((lakhs) => {
+        return fmtCr(lakhs, gameState?.currency || 'inr', LEAGUE_DEFAULTS[gameState?.league] || 'inr');
+    }, [gameState?.currency, gameState?.league]);
 
     const [activeTeams, setActiveTeams] = useState(gameState?.teams || []);
+
+    const myTeam = useMemo(() => {
+        if (!activeTeams || activeTeams.length === 0) return null;
+        return userId 
+            ? activeTeams.find(t => t.ownerUserId === userId)
+            : activeTeams.find(t => t.ownerSocketId === socket?.id);
+    }, [activeTeams, userId, socket?.id]);
+
     const [recentSold, setRecentSold] = useState([]); // Track last 10 sold players
+    const [auctionFeed, setAuctionFeed] = useState([]); // Unified chronological auction feed (newest first)
     const [allPlayersMap, setAllPlayersMap] = useState({});
     const [onlineMap, setOnlineMap] = useState({});
     const [coHostUserIds, setCoHostUserIds] = useState(location.state?.roomState?.coHostUserIds || []);
     const [teamRosters, setTeamRosters] = useState({}); // Lazy-loaded player lists: { teamId: [players] }
+
+    const dedupePlayerHistory = (history = []) => {
+        const seen = new Set();
+        return history.filter((item, index) => {
+            const key = item?._id || item?.playerId || `${item?.name || item?.player || 'unknown'}-${item?.basePrice || item?.amount || index}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    };
 
     useEffect(() => {
         // Fetch players to create a fallback name map in case backend only sends IDs
@@ -256,6 +147,48 @@ const AuctionPodium = () => {
 
     // Legendary Welcome State
     const [legendaryWelcome, setLegendaryWelcome] = useState(null);
+    const legendIntroTimersRef = useRef([]);
+
+    const clearLegendIntroTimers = useCallback(() => {
+        legendIntroTimersRef.current.forEach(clearTimeout);
+        legendIntroTimersRef.current = [];
+    }, []);
+
+    const triggerLegendIntro = useCallback((player, pName, league, finalizeFn) => {
+        const meta = getLegendMetadata(pName, league);
+        if (!meta) return finalizeFn();
+        clearLegendIntroTimers();
+        stopLegendIntro();
+        setLegendaryWelcome({
+            ...player,
+            ...meta
+        });
+        playLegendIntro();
+
+        legendIntroTimersRef.current.push(setTimeout(finalizeFn, 2000));
+        legendIntroTimersRef.current.push(setTimeout(() => {
+            setLegendaryWelcome(null);
+            stopLegendIntro();
+        }, 5000));
+    }, [clearLegendIntroTimers]);
+
+    useEffect(() => () => {
+        clearLegendIntroTimers();
+        stopLegendIntro();
+    }, [clearLegendIntroTimers]);
+
+    // Memoized particles to avoid calling Math.random() during render (pure component compliance)
+    const welcomeParticles = useMemo(() => {
+        return Array.from({ length: 18 }).map(() => ({
+            x: (Math.random() - 0.5) * 1500,
+            y: (Math.random() - 0.5) * 1500,
+            scale: Math.random() * 1.5 + 0.5,
+            targetY: (Math.random() - 0.5) * 1500 - 300,
+            duration: Math.random() * 4 + 4,
+            delay: Math.random() * 5
+        }));
+    }, []);
+
     const [endRequest, setEndRequest] = useState(null);
     const endRequestRef = useRef(null);
     useEffect(() => {
@@ -376,6 +309,12 @@ const AuctionPodium = () => {
             if (state.status === "Selection") {
                 return navigate(`/selection/${roomCode}`);
             }
+            if (state.status === "Quiz") {
+                return navigate(`/quiz/${roomCode}`);
+            }
+            if (state.status === "Evaluating") {
+                return navigate(`/evaluating/${roomCode}`);
+            }
             if (state.status === "Finished") {
                 return navigate(`/results/${roomCode}`, { state: { finalTeams: state.teams } });
             }
@@ -386,20 +325,82 @@ const AuctionPodium = () => {
             setTimer(state.timer || 10);
 
 
-            // Re-link team using userId (permanent)
-            const myTeamInState = userId
-                ? state.teams?.find(t => t.ownerUserId === userId)
-                : state.teams?.find(t => t.ownerSocketId === socket.id);
-
-            if (myTeamInState) {
-                setMyTeam(myTeamInState);
-            }
+            // Re-link logic removed as myTeam is now derived via useMemo from activeTeams.
 
             if (state.unsoldHistory) {
-                setUnsoldHistory(state.unsoldHistory);
+                setUnsoldHistory(dedupePlayerHistory(state.unsoldHistory));
+            }
+
+            // Reconstruct unified auctionFeed from server state on join
+            // Both recentSold (from state.recentSold) and unsoldHistory are available
+            // Merge them by timestamp and sort newest-first
+            const allSoldPlayers = [];
+            if (state.teams) {
+                state.teams.forEach(t => {
+                    if (t.playersAcquired) {
+                        t.playersAcquired.forEach(p => {
+                            allSoldPlayers.push({
+                                ...p,
+                                teamName: t.teamName,
+                                teamLogo: t.teamLogo,
+                                teamThemeColor: t.teamThemeColor,
+                                ownerName: t.ownerName,
+                                teamShort: t.shortName || t.teamName
+                            });
+                        });
+                    }
+                });
+            }
+
+            const feedFromSold = allSoldPlayers.map((item, idx) => ({
+                key: `sold-${item._id || item.player || item.name || idx}`,
+                type: 'sold',
+                playerName: item.name || item.player,
+                playerImage: item.imagepath || item.image_path || item.photoUrl,
+                teamLogo: item.teamLogo,
+                teamShort: resolveTeamShort(item.teamName, item.teamLogo, item.teamShort),
+                teamColor: item.teamThemeColor,
+                ownerName: item.ownerName || item.teamName,
+                amount: item.boughtFor || item.price || item.amount,
+                slogan: item.slogan,
+                timestamp: item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+                _sortTime: item.timestamp || '',
+            }));
+            const feedFromUnsold = (state.unsoldHistory || []).map((item, idx) => ({
+                key: `unsold-${item._id || item.playerId || item.name || item.player || idx}`,
+                type: 'unsold',
+                playerName: item.name || item.player,
+                playerImage: item.imagepath || item.image_path || item.photoUrl,
+                timestamp: item.timestamp,
+                _sortTime: item.timestamp || '',
+            }));
+            const combinedFeed = [...feedFromSold, ...feedFromUnsold]
+                .sort((a, b) => (b._sortTime > a._sortTime ? 1 : -1))
+                .filter((item, idx, self) => self.findIndex(e => e.key === item.key) === idx);
+            if (combinedFeed.length > 0) {
+                setAuctionFeed(combinedFeed);
+                // Also hydrate chat messages so the unified feed feels complete upon refresh.
+                // We reverse it to be oldest first for standard chat flow.
+                const initialChatMessages = [...combinedFeed].reverse().map(item => ({
+                    id: item.key,
+                    type: item.type,
+                    playerName: item.playerName,
+                    playerImage: item.playerImage,
+                    senderLogo: item.teamLogo,
+                    teamShort: item.teamShort,
+                    senderColor: item.teamColor,
+                    ownerName: item.ownerName,
+                    amount: item.amount,
+                    slogan: item.slogan,
+                    timestamp: item.timestamp,
+                }));
+                setChatMessages(initialChatMessages);
             }
 
             if (state.coHostUserIds) setCoHostUserIds(state.coHostUserIds);
+            if (state.rtmState) {
+                setRtmState(state.rtmState);
+            }
 
             // Set full catalog and upcoming players from join data
             if (state.players && state.players.length > 0) {
@@ -409,31 +410,21 @@ const AuctionPodium = () => {
             }
 
             // Request own team roster immediately for War Room view (redundant but safe)
+            const myTeamInState = userId
+                ? state.teams?.find(t => t.ownerUserId === userId)
+                : state.teams?.find(t => t.ownerSocketId === socket.id);
             if (myTeamInState) {
                 socket.emit("request_team_roster", { teamId: myTeamInState.id || myTeamInState.franchiseId });
             }
 
             if (state.activePlayer) {
                 const pName = state.activePlayer.name || state.activePlayer.player;
-                if (!state.isAiMode && pName && LEGEND_METADATA[pName] && (!state.activeBid || state.activeBid.amount === 0)) {
-                    setLegendaryWelcome({
-                        ...state.activePlayer,
-                        ...LEGEND_METADATA[pName]
-                    });
-                    playLegendIntro();
-                    
-                    // DELAY: Update the podium behind the intro after 2.0s (mid-intro reveal)
-                    setTimeout(() => {
+                if (!state.isAiMode && pName && isLegendPlayer(pName, state.league) && (!state.activeBid || state.activeBid.amount === 0)) {
+                    triggerLegendIntro(state.activePlayer, pName, state.league, () => {
                         setCurrentPlayer(state.activePlayer);
                         currentPlayerRef.current = state.activePlayer;
                         if (state.activeBid) setCurrentBid(state.activeBid);
-                    }, 2000);
-
-                    // Clear overlay after 5.0s (starts 2.0s fade-out, total 7s)
-                    setTimeout(() => {
-                        setLegendaryWelcome(null);
-                        stopLegendIntro();
-                    }, 5000);
+                    });
                 } else {
                     setCurrentPlayer(state.activePlayer);
                     currentPlayerRef.current = state.activePlayer;
@@ -476,13 +467,14 @@ const AuctionPodium = () => {
             
             // Shared reset logic (history reset should be immediate to avoid stale data during intro)
             setSoldEvent(null);
+            setRtmState(null);
             setBidHistory([]);
             bidWarSentRef.current = false;
             if (incomingSkipped) setSkippedHistory(incomingSkipped);
             if (nextPlayers) {
                 setUpcomingPlayers(nextPlayers);
                 nextPlayers.forEach(p => {
-                    const url = p.imagepath || p.image_path || p.photoUrl;
+                    const url = resolvePlayerImageUrl(p);
                     if (url) new Image().src = url;
                 });
             }
@@ -500,26 +492,10 @@ const AuctionPodium = () => {
             };
 
             const pName = player?.name || player?.player;
-            const isLegend = !gameState?.isAiMode && pName && LEGEND_METADATA[pName] && !isInitial;
+            const isLegend = !gameState?.isAiMode && pName && isLegendPlayer(pName, gameState?.league) && !isInitial;
 
             if (isLegend) {
-                // Trigger Legendary Welcome FIRST
-                setLegendaryWelcome({
-                    ...player,
-                    ...LEGEND_METADATA[pName]
-                });
-                playLegendIntro();
-                
-                // DELAY: Update the podium behind the intro after 2.0s (mid-intro reveal)
-                setTimeout(() => {
-                    finalizePlayerState();
-                }, 2000);
-                
-                // Clear overlay after 5.0s (starts 2.0s fade-out, total 7s)
-                setTimeout(() => {
-                    setLegendaryWelcome(null);
-                    stopLegendIntro();
-                }, 5000);
+                triggerLegendIntro(player, pName, gameState?.league, finalizePlayerState);
             } else {
                 // Regular player: Update everything immediately
                 finalizePlayerState();
@@ -583,9 +559,9 @@ const AuctionPodium = () => {
                     if (threshold !== null && amount >= threshold) {
                         bidWarSentRef.current = true;
                         setChatMessages(prev => [
-                            ...prev.slice(-49),
+                            ...prev.slice(-199),
                             {
-                                id: `bidwar-${Date.now()}`,
+                                id: `bidwar-${Date.now()}-${Math.random()}`,
                                 type: 'bidding_war',
                                 playerName: player.name || player.player,
                                 playerImage: player.imagepath || player.image_path || player.photoUrl,
@@ -602,12 +578,36 @@ const AuctionPodium = () => {
         const handlePlayerSold = ({ player, winningBid, teams }) => {
             setSoldEvent({ type: "SOLD", player, winningBid });
             setActiveTeams(teams);
+            const soldTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const soldTeamShort = resolveTeamShort(
+                winningBid.teamName,
+                winningBid.teamLogo,
+                teams.find(t => t.teamName === winningBid.teamName)?.shortName
+            );
+            const soldFeedEntry = {
+                key: `sold-${player._id || player.playerId || player.name}-${Date.now()}`,
+                type: 'sold',
+                playerName: player.player || player.name,
+                playerImage: player.imagepath || player.image_path || player.photoUrl,
+                teamLogo: winningBid.teamLogo,
+                teamShort: soldTeamShort,
+                teamColor: winningBid.teamColor,
+                ownerName: winningBid.ownerName || teams.find(t => t.teamName === winningBid.teamName)?.ownerName,
+                amount: winningBid.amount,
+                timestamp: soldTimestamp,
+            };
+            setAuctionFeed(prev => [soldFeedEntry, ...prev].slice(0, 50));
             setRecentSold(prev => [{
                 name: player.player || player.name,
+                playerId: player._id || player.playerId,
+                playerImage: player.imagepath || player.image_path || player.photoUrl,
                 team: winningBid.teamName,
+                teamShort: soldTeamShort,
                 teamLogo: winningBid.teamLogo,
                 teamColor: winningBid.teamColor,
-                price: winningBid.amount
+                ownerName: winningBid.ownerName || teams.find(t => t.teamName === winningBid.teamName)?.ownerName,
+                price: winningBid.amount,
+                timestamp: soldTimestamp,
             }, ...prev].slice(0, 10));            // Logic for Verdict Message — pool-aware fixed price thresholds
             const price = winningBid.amount; // in Lakhs (e.g. 500 = 5 Cr)
             const poolID = (player.poolID || '').toLowerCase();
@@ -634,31 +634,51 @@ const AuctionPodium = () => {
             }
 
             const winningTeam = teams.find(t => t.teamName === winningBid.teamName);
-            const teamShort = winningTeam?.shortName || winningBid.teamName;
+            const teamShort = resolveTeamShort(
+                winningBid.teamName,
+                winningBid.teamLogo || winningTeam?.teamLogo,
+                winningTeam?.shortName
+            );
+            const playerDisplayName = player.name || player.player;
+            let slogan = getTeamSoldSlogan(
+                teamShort || winningBid.teamName,
+                playerDisplayName,
+                winningBid.teamLogo
+            );
+
+            // Cleanly override slogan if RTM was used
+            if (winningBid.isRtm) {
+                slogan = "Acquired via Right To Match (RTM)";
+            }
 
             // Integrate into Chat
             setChatMessages(prev => [
-                ...prev.slice(-49),
+                ...prev.slice(-199),
                 {
-                    id: `sold-${Date.now()}`,
+                    id: `sold-${Date.now()}-${Math.random()}`,
                     type: 'sold',
-                    senderName: 'System',
+                    senderName: winningBid.ownerName || winningTeam?.ownerName || 'Franchise',
+                    ownerName: winningBid.ownerName || winningTeam?.ownerName,
                     senderTeam: winningBid.teamName,
-                    senderColor: winningBid.teamColor,
-                    senderLogo: winningBid.teamLogo,
-                    message: `${teamShort} bought ${player.name} for ${fmtCr(winningBid.amount)}`,
-                    playerName: player.name,
+                    teamShort,
+                    senderColor: winningBid.teamColor || winningTeam?.teamThemeColor,
+                    senderLogo: winningBid.teamLogo || winningTeam?.teamLogo,
+                    message: `${teamShort || winningBid.teamName} bought ${playerDisplayName} for ${fmt(winningBid.amount)}`,
+                    playerName: playerDisplayName,
                     playerImage: player.imagepath || player.image_path || player.photoUrl,
                     amount: winningBid.amount,
                     basePrice: player.basePrice,
                     verdict,
-                    congrats: `Congratulations ${teamShort}! 🎉`,
+                    slogan,
                     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                 }
             ]);
 
             const myUpdate = teams.find(t => t.ownerUserId === userId || t.ownerSocketId === socket.id);
-            if (myUpdate) setMyTeam(myUpdate);
+            if (myUpdate) {
+                // myTeam auto-updates via activeTeams in the useMemo
+                // but we may want to ensure activeTeams was properly set
+            }
         };
 
         const handleRoomDisbanded = () => {
@@ -685,39 +705,56 @@ const AuctionPodium = () => {
 
         const handlePlayerUnsold = ({ player, unsoldHistory: updatedHistory }) => {
             setSoldEvent({ type: "UNSOLD", player });
-            if (updatedHistory) setUnsoldHistory(updatedHistory);
+            if (updatedHistory) setUnsoldHistory(dedupePlayerHistory(updatedHistory));
+            // Add unsold event to the unified chronological feed
+            const unsoldFeedEntry = {
+                key: `unsold-${player._id || player.playerId || player.name || player.player}-${Date.now()}`,
+                type: 'unsold',
+                playerName: player.name || player.player,
+                playerImage: player.imagepath || player.image_path || player.photoUrl,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            };
+            setAuctionFeed(prev => [unsoldFeedEntry, ...prev].slice(0, 50));
 
             // Shocking unsold card for high-value pools
             const poolID = (player.poolID || '').toLowerCase();
             const isHighValue = poolID.startsWith('marquee') || poolID.includes('pool1');
-            if (isHighValue) {
-                setChatMessages(prev => [
-                    ...prev.slice(-49),
-                    {
-                        id: `shocking-unsold-${Date.now()}`,
-                        type: 'shocking_unsold',
-                        playerName: player.name || player.player,
-                        playerImage: player.imagepath || player.image_path || player.photoUrl,
-                        poolID: player.poolID,
-                        basePrice: player.basePrice,
-                        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                    }
-                ]);
-            }
+            
+            setChatMessages(prev => [
+                ...prev.slice(-199),
+                {
+                    id: `${isHighValue ? 'shocking-' : ''}unsold-${Date.now()}-${Math.random()}`,
+                    type: isHighValue ? 'shocking_unsold' : 'unsold',
+                    playerName: player.name || player.player,
+                    playerImage: player.imagepath || player.image_path || player.photoUrl,
+                    poolID: player.poolID,
+                    basePrice: player.basePrice,
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                }
+            ]);
         };
 
-        const handleAuctionFinished = ({ teams }) => {
-            setTimeout(() => {
-                navigate(`/results/${roomCode}`, { state: { finalTeams: teams } });
-            }, 3000);
+        const handleAuctionFinished = ({ teams, quizLeaderboard }) => {
+            navigate(`/results/${roomCode}`, { state: { finalTeams: teams, quizLeaderboard } });
+        };
+
+        const handleQuizPhaseStarted = () => {
+            navigate(`/quiz/${roomCode}`);
+        };
+
+        const handleQuizPhaseEnded = () => {
+            navigate(`/evaluating/${roomCode}`);
+        };
+
+        const handleEvaluationStarted = ({ timer }) => {
+            setEvalTimer(timer);
+            navigate(`/evaluating/${roomCode}`);
         };
 
         const handleLobbyUpdate = ({ teams }) => {
             if (teams) {
                 setActiveTeams(teams);
                 setGameState(prev => prev ? { ...prev, teams } : null);
-                const myUpdate = teams.find(t => t.ownerUserId === userId || t.ownerSocketId === socket.id);
-                if (myUpdate) setMyTeam(myUpdate);
             }
         };
 
@@ -747,9 +784,8 @@ const AuctionPodium = () => {
         const handleTeamRosterData = ({ teamId, playersAcquired }) => {
             setTeamRosters(prev => ({ ...prev, [teamId]: playersAcquired }));
             // If this is my team, sync it immediately
-            if (myTeamRef.current && (myTeamRef.current.id === teamId || myTeamRef.current.franchiseId === teamId)) {
-                setMyTeam(prev => ({ ...prev, playersAcquired }));
-            }
+            // myTeam will auto-update if activeTeams is synced later. 
+            // In the meantime, updating `teamRosters` is enough for roster view.
         };
 
         // --- Attachment ---
@@ -792,6 +828,7 @@ const AuctionPodium = () => {
             if (payload.timer !== undefined) setTimer(payload.timer);
             if (payload.teams) setActiveTeams(payload.teams);
             if (payload.last5Bids) setBidHistory(payload.last5Bids);
+            if (payload.rtmState !== undefined) setRtmState(payload.rtmState);
         });
         socket.on("interest_voting_started", ({ players, timer }) => {
             // IF host is ending the auction, ignore voting requests
@@ -809,13 +846,12 @@ const AuctionPodium = () => {
             setToast({ message, type: "info" });
         });
         socket.on("auction_finished", handleAuctionFinished);
+        socket.on("quiz_phase_started", handleQuizPhaseStarted);
+        socket.on("quiz_phase_ended", handleQuizPhaseEnded);
         socket.on("settings_updated", handleSettingsUpdated);
         socket.on("host_changed", handleHostChanged);
         
-        socket.on("evaluation_started", ({ timer }) => {
-            setEvalTimer(timer);
-            setGameState(prev => prev ? { ...prev, status: "Evaluating" } : null);
-        });
+        socket.on("evaluation_started", handleEvaluationStarted);
         socket.on("evaluation_timer_tick", ({ timer }) => {
             setEvalTimer(timer);
         });
@@ -828,7 +864,7 @@ const AuctionPodium = () => {
             else if (payload?.state?.timer !== undefined) setTimer(payload.state.timer);
         });
         socket.on("cohosts_updated", handleCoHostsUpdated);
-        socket.on("receive_chat_message", (msg) => setChatMessages(prev => [...prev.slice(-49), msg])); // Keep last 50 for performance
+        socket.on("receive_chat_message", (msg) => setChatMessages(prev => [...prev.slice(-199), msg])); // Keep last 200 for performance
         socket.on("spectator_update", ({ spectators }) => setSpectators(spectators));
         socket.on("join_requests_update", ({ roomCode: code, requests }) => {
             if (code === roomCode) setJoinRequests(requests);
@@ -862,9 +898,11 @@ const AuctionPodium = () => {
             socket.off("player_unsold", handlePlayerUnsold);
             socket.off("auction_state_sync");
             socket.off("auction_finished", handleAuctionFinished);
+            socket.off("quiz_phase_started", handleQuizPhaseStarted);
+            socket.off("quiz_phase_ended", handleQuizPhaseEnded);
             socket.off("settings_updated", handleSettingsUpdated);
             socket.off("host_changed", handleHostChanged);
-            socket.off("evaluation_started");
+            socket.off("evaluation_started", handleEvaluationStarted);
             socket.off("evaluation_timer_tick");
             socket.off("auction_paused");
             socket.off("auction_resumed");
@@ -881,40 +919,31 @@ const AuctionPodium = () => {
             socket.off("end_acknowledgement_update", handleEndAcknowledgementUpdate);
             socket.off("auction_end_cancelled", handleAuctionEndCancelled);
         };
-    }, [socket, roomCode, isSessionReady, userId, playerName, navigate, forceSpectator]);
-
-    // Dynamic Increment Logic — matches server-side validation exactly
-    const getMinIncrement = () => {
-        if (!currentPlayer) return 25;
-        const poolID = currentPlayer.poolID || '';
-        const curAmt = currentBid.amount;
-        const lowerPool = poolID.toLowerCase();
-
-        if (lowerPool.startsWith('marquee') || lowerPool.includes('pool1') || lowerPool.includes('pool2')) {
-            return 25; // flat 25L
-        } else if (lowerPool.includes('emerging') || lowerPool.includes('pool3') || lowerPool.includes('pool4')) {
-            // Emerging, Pool 3, Pool 4: 5L up to 2Cr, then 25L
-            return curAmt < 200 ? 5 : 25;
-        }
-        return 25; // safe fallback
-    };
+    }, [socket, roomCode, isSessionReady, userId, playerName, navigate, forceSpectator, triggerLegendIntro]);
 
     // Base price per pool if no bid placed yet
     const getPoolBasePrice = () => {
         if (!currentPlayer) return 50;
+        if (currentPlayer.basePrice !== undefined && currentPlayer.basePrice !== null) {
+            return currentPlayer.basePrice;
+        }
         const poolID = currentPlayer.poolID || '';
-        if (poolID === 'marquee') return currentPlayer.basePrice || 200;
-        if (poolID === 'pool1_batsmen' || poolID === 'pool1_bowlers') return currentPlayer.basePrice || 150;
-        if (poolID === 'emerging_players') return currentPlayer.basePrice || 30;
-        if (poolID === 'pool2_batsmen' || poolID === 'pool2_bowlers') return currentPlayer.basePrice || 100;
-        return currentPlayer.basePrice || 50; // pool3, pool4
+        if (poolID === 'marquee') return 200;
+        if (poolID === 'pool1_batsmen' || poolID === 'pool1_bowlers') return 150;
+        if (poolID === 'emerging_players') return 30;
+        if (poolID === 'pool2_batsmen' || poolID === 'pool2_bowlers') return 100;
+        return 50; // pool3, pool4
     };
 
-    const minIncrement = getMinIncrement();
-    const targetAmount =
-        currentBid.amount === 0
-            ? getPoolBasePrice()
-            : currentBid.amount + minIncrement;
+    const minIncrement = getMinIncrement(currentPlayer?.poolID || '', currentBid.amount, gameState?.league || '');
+    const maxSquad = gameState?.league === 'wpl' ? 18 : (gameState?.league === 'sa20' ? 19 : 25);
+    const maxOverseas = gameState?.league === 'wpl' ? 6 : (gameState?.league === 'sa20' ? 7 : 8);
+    const targetAmount = getNextBidAmount(
+        currentBid.amount,
+        getPoolBasePrice(),
+        currentPlayer?.poolID || '',
+        gameState?.league || ''
+    );
 
 
     const handleBid = useCallback(() => {
@@ -964,6 +993,11 @@ const AuctionPodium = () => {
         }
     }, [endRequest, humanOwners, userId, isModerator, handleFinalizeEnd]);
 
+    const handleClaimHost = () => {
+        if (!socket || !roomCode) return;
+        socket.emit("claim_host", { roomCode });
+    };
+
     const handleToggleCoHost = useCallback((targetUserId) => {
         socket.emit("toggle_cohost", { roomCode, userId: targetUserId });
     }, [socket, roomCode]);
@@ -997,7 +1031,7 @@ const AuctionPodium = () => {
 
     const ringRadius = 45;
     const ringCircumference = 2 * Math.PI * ringRadius;
-    const maxTimer = gameState?.timerDuration || 10;
+    const maxTimer = rtmState ? 15 : (gameState?.timerDuration || 10);
     const timerDashoffset =
         ringCircumference - (timer / maxTimer) * ringCircumference;
 
@@ -1029,40 +1063,17 @@ const AuctionPodium = () => {
         );
     }
 
-    if (gameState?.status === "Evaluating") {
+    if (gameState?.status === "Evaluating" || gameState?.status === "Quiz") {
         return (
-            <div className="min-h-screen bg-[#0a0702] flex flex-col items-center justify-center p-6 text-center relative overflow-hidden font-sans">
-                <div className="absolute inset-0 bg-sweeping-lines opacity-20"></div>
-                <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-blue-600/10 blur-[150px] rounded-full pointer-events-none"></div>
-                <div className="absolute bottom-0 left-0 w-[500px] h-[500px] bg-purple-600/10 blur-[150px] rounded-full pointer-events-none"></div>
-
-                <div className="z-10 flex flex-col items-center">
-                    <motion.div
-                        animate={{ rotate: 360 }}
-                        transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-                        className="w-24 h-24 border-4 border-[#D4AF37]/10 border-t-[#D4AF37] border-r-[#D4AF37] rounded-full mb-8 shadow-[0_0_30px_rgba(212,175,55,0.2)]"
-                    />
-                    <h1 className="text-4xl md:text-6xl font-black uppercase tracking-tighter mb-4 italic text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-white to-purple-400">
-                        Analyzing Squads
-                    </h1>
-                    <p className="text-[#D4AF37]/70 text-xs md:text-sm max-w-lg leading-relaxed font-bold uppercase tracking-widest mb-12">
-                        Gemini AI is performing deep tactical evaluations, calculating balance scores, and identifying critical weaknesses.
-                    </p>
-
-                    <div className="glass-panel p-8 rounded-[32px] border-white/10 flex flex-col items-center min-w-[280px] bg-white/5 backdrop-blur-md">
-                        <div className="text-[10px] font-black text-slate-500 uppercase tracking-[0.3em] mb-4">Evaluation Timer</div>
-                        <div className="text-6xl md:text-8xl font-black font-mono tracking-tighter text-white drop-shadow-2xl">
-                            {evalTimer}
-                            <span className="text-2xl text-slate-500 ml-2">s</span>
-                        </div>
-                    </div>
-                </div>
+            <div className="min-h-screen bg-[#040810] flex flex-col items-center justify-center text-white">
+                <div className="w-12 h-12 border-4 border-blue-500/20 border-t-blue-400 rounded-full animate-spin mb-4" />
+                <p className="text-sm font-bold uppercase tracking-widest text-slate-400">Transitioning to next phase...</p>
             </div>
         );
     }
 
     return (
-        <div className="flex flex-col lg:flex-row h-[100dvh] bg-[var(--dark-depth)] bg-sweeping-lines text-slate-100 font-sans selection:bg-yellow-500/30 overflow-hidden relative">
+        <div className="flex flex-col lg:flex-row h-[100dvh] bg-sweeping-lines text-slate-100 font-sans selection:bg-yellow-500/30 overflow-hidden relative" style={{ background: 'linear-gradient(135deg, #241607 0%, #120a02 100%)' }}>
             {/* Grand Welcome Overlay for Legends */}
             <AnimatePresence>
                 {legendaryWelcome && (
@@ -1136,9 +1147,12 @@ const AuctionPodium = () => {
                                     
                                     <div className="relative w-56 h-56 sm:w-72 sm:h-72 rounded-full border-[6px] border-[#D4AF37] overflow-hidden bg-black shadow-[0_0_80px_rgba(212,175,55,0.4)] gpu-accelerated">
                                         <img
-                                            src={legendaryWelcome.imagepath || legendaryWelcome.image_path || legendaryWelcome.photoUrl}
+                                            src={resolvePlayerImageUrl(legendaryWelcome) || getPlayerImageFallback(legendaryWelcome)}
                                             alt={legendaryWelcome.name}
                                             className="w-full h-full object-cover scale-110 group-hover:scale-125 transition-transform duration-1000 ease-out"
+                                            onError={(e) => {
+                                                e.target.src = getPlayerImageFallback(legendaryWelcome);
+                                            }}
                                         />
                                     </div>
 
@@ -1188,26 +1202,25 @@ const AuctionPodium = () => {
                                 </div>
                             </motion.div>
                         </div>
-
                         {/* 4. Optimized Particles */}
-                        {[...Array(18)].map((_, i) => (
+                        {welcomeParticles.map((pt, i) => (
                             <motion.div
                                 key={`particle-${i}`}
                                 initial={{ 
                                     opacity: 0, 
                                     scale: 0,
-                                    x: (Math.random() - 0.5) * 1500,
-                                    y: (Math.random() - 0.5) * 1500
+                                    x: pt.x,
+                                    y: pt.y
                                 }}
                                 animate={{
                                     opacity: [0, 0.8, 0],
-                                    scale: [0, Math.random() * 1.5 + 0.5, 0],
-                                    y: [(Math.random() - 0.5) * 1500, (Math.random() - 0.5) * 1500 - 300]
+                                    scale: [0, pt.scale, 0],
+                                    y: [pt.y, pt.targetY]
                                 }}
                                 transition={{
-                                    duration: Math.random() * 4 + 4,
+                                    duration: pt.duration,
                                     repeat: Infinity,
-                                    delay: Math.random() * 5
+                                    delay: pt.delay
                                 }}
                                 className="absolute w-1 h-1 bg-white rounded-full gpu-accelerated"
                                 style={{ 
@@ -1232,24 +1245,16 @@ const AuctionPodium = () => {
                 {/* Diagonal Sweeping Lines */}
                 <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-10"></div>
                 
-                {/* Shocking Unsold Red Light Overlay */}
+                {/* Subtle unsold vignette — premium, no red alarm */}
                 <AnimatePresence>
                     {soldEvent?.type === 'UNSOLD' && (
                         <motion.div
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
-                            exit={{ opacity: 0, transition: { duration: 1 } }}
+                            exit={{ opacity: 0, transition: { duration: 0.8 } }}
                             className="absolute inset-0 pointer-events-none z-50"
                         >
-                            {/* Aggressive Red Vignette */}
-                            <div className="absolute inset-0 bg-[radial-gradient(100%_100%_at_50%_50%,transparent_30%,rgba(220,38,38,0.85)_100%)]"></div>
-                            
-                            {/* Flashing Red Alarm Wash */}
-                            <motion.div
-                                animate={{ opacity: [0.1, 0.5, 0.1] }}
-                                transition={{ duration: 0.8, repeat: Infinity, ease: "easeInOut" }}
-                                className="absolute inset-0 bg-red-600/40 mix-blend-screen"
-                            />
+                            <div className="absolute inset-0 bg-[radial-gradient(100%_100%_at_50%_50%,transparent_50%,rgba(18,10,2,0.6)_100%)]" />
                         </motion.div>
                     )}
                 </AnimatePresence>
@@ -1259,7 +1264,7 @@ const AuctionPodium = () => {
             <div
                 className={`
                 fixed lg:relative inset-y-0 left-0 z-[150] lg:z-10
-                w-full lg:w-80 xl:w-96 bg-[#07090f]/95 lg:bg-transparent backdrop-blur-xl lg:backdrop-blur-none border-r border-yellow-500/10 lg:border-none
+                w-full lg:w-80 xl:w-96 bg-[#120a02]/95 lg:bg-transparent backdrop-blur-xl lg:backdrop-blur-none border-r border-yellow-500/10 lg:border-none
                 transition-transform duration-300 transform pb-16 lg:pb-0
                 ${activeTab === "teams" ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
                 flex flex-col h-[100dvh] lg:h-auto
@@ -1308,6 +1313,8 @@ const AuctionPodium = () => {
                         onToggleCoHost={handleToggleCoHost}
                         teamRosters={teamRosters}
                         voiceParticipants={voiceParticipants}
+                        league={gameState?.league}
+                        currency={gameState?.currency}
                     />
                 </div>
             </div>
@@ -1369,40 +1376,11 @@ const AuctionPodium = () => {
                             </div>
                         </div>
 
-                        {/* Right Side: Voice Connection & Host Controls */}
-                        <div className="flex items-center gap-2 sm:gap-4">
-                            {/* Voice Controls (Compact on Mobile) */}
-                            {isVoiceJoined ? (
-                              <div className="flex items-center gap-1.5 p-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full lg:rounded-xl">
-                                <button
-                                    onClick={toggleMute}
-                                    className={`p-2.5 rounded-full border transition-all flex items-center justify-center ${isVoiceMuted ? 'bg-red-500/10 border-red-500/30 text-red-500' : 'bg-sky-500 border-sky-400 text-[#080400] animate-pulse shadow-[0_0_15px_rgba(14,165,233,0.5)]'}`}
-                                    title={isVoiceMuted ? "Unmute Microphone" : "Mute Microphone"}
-                                >
-                                    {isVoiceMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                                </button>
-                                <button
-                                    onClick={() => leaveVoice(roomCode)}
-                                    className="p-2.5 rounded-full bg-red-500 border border-red-400 text-white shadow-[0_0_10px_rgba(239,68,68,0.3)] hover:bg-red-600 transition-all flex items-center justify-center"
-                                    title="Exit Voice Chat"
-                                >
-                                    <Phone className="w-4 h-4" />
-                                </button>
-                                <div className="px-2 py-0.5 bg-sky-500/5 rounded-full hidden lg:flex items-center gap-1">
-                                    <div className="w-1 h-1 rounded-full bg-sky-500 animate-pulse shadow-[0_0_5px_#38bdf8]"></div>
-                                    <span className="text-[7px] font-black text-sky-500 uppercase tracking-widest">In Voice</span>
-                                </div>
-                              </div>
-                            ) : (
-                                <button
-                                    onClick={() => joinVoice(roomCode)}
-                                    className="p-2 sm:p-2.5 bg-yellow-500/10 border border-yellow-500/30 text-yellow-500 rounded-full hover:bg-yellow-500/20 transition-all flex items-center justify-center shadow-md"
-                                    title="Join Voice Chat"
-                                >
-                                    <Phone className="w-4 h-4" />
-                                </button>
-                            )}
-                            
+                        {/* Right Side: Voice, Fullscreen & Host Controls */}
+                        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+                            <VoiceControls roomCode={roomCode} compact />
+                            <FullscreenToggle />
+
                             {/* Host Controls Block */}
                             {isModerator && (
                                 <div className="flex items-center gap-1.5 p-1 glass-panel rounded-full lg:rounded-xl border border-[#D4AF37]/20">
@@ -1567,7 +1545,7 @@ const AuctionPodium = () => {
                                                 {s.team}
                                             </span>
                                             <span className="ml-2 text-[10px] font-mono font-black text-white/50">
-                                                {fmtCr(s.price)}
+                                                {fmt(s.price)}
                                             </span>
                                         </div>
                                     ))}
@@ -1603,7 +1581,7 @@ const AuctionPodium = () => {
                                                     {s.team}
                                                 </span>
                                                 <span className="ml-2 text-[10px] font-mono font-black text-white/50">
-                                                    {fmtCr(s.boughtFor)}
+                                                    {fmt(s.boughtFor)}
                                                 </span>
                                             </div>
                                         ))}
@@ -1627,7 +1605,7 @@ const AuctionPodium = () => {
                                                     UNSOLD
                                                 </span>
                                                 <span className="ml-2 text-[10px] font-mono font-black text-white/50">
-                                                    {fmtCr(p.basePrice)}
+                                                    {fmt(p.basePrice)}
                                                 </span>
                                             </div>
                                         ))}
@@ -1769,19 +1747,9 @@ const AuctionPodium = () => {
                                             initial={{ scale: 1.1 }}
                                             animate={{ scale: 1 }}
                                             transition={{ duration: 0.8 }}
-                                            src={(() => {
-                                                const url = currentPlayer.image_path ||
-                                                    currentPlayer.imagepath ||
-                                                    currentPlayer.photoUrl;
-                                                
-                                                // Minimal validation for data URLs
-                                                if (url && url.startsWith('data:') && !url.includes('base64,')) {
-                                                    return `https://api.dicebear.com/7.x/initials/svg?seed=Invalid+Image`;
-                                                }
-                                                return url || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(currentPlayer?.player || currentPlayer?.name || "Player")}&backgroundColor=030712`;
-                                            })()}
+                                            src={resolvePlayerImageUrl(currentPlayer) || getPlayerImageFallback(currentPlayer)}
                                             onError={(e) => {
-                                                e.target.src = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(currentPlayer?.player || currentPlayer?.name || "Player")}&backgroundColor=030712`;
+                                                e.target.src = getPlayerImageFallback(currentPlayer);
                                             }}
                                             alt={
                                                 currentPlayer.player || currentPlayer.name || "Player"
@@ -1789,9 +1757,11 @@ const AuctionPodium = () => {
                                             className="w-full h-full object-cover object-top drop-shadow-[0_-5px_15px_rgba(234,179,8,0.25)]" // Rim lighting effect
                                         />
                                         {/* Cinematic Smoke/Fog fade at the bottom of the image */}
-                                        <div className="absolute inset-x-0 bottom-0 h-[50%] bg-gradient-to-t from-[#0e111a] via-[#0e111a]/80 to-transparent"></div>
-                                        <div className="absolute inset-x-0 bottom-0 h-[30%] bg-gradient-to-t from-[var(--dark-depth)] to-transparent"></div>
+                                        <div className="absolute inset-x-0 bottom-0 h-[50%] bg-gradient-to-t from-[#1a1205] via-[#1a1205]/80 to-transparent"></div>
+                                        <div className="absolute inset-x-0 bottom-0 h-[30%] bg-gradient-to-t from-[#120a02] to-transparent"></div>
                                     </div>
+
+
 
                                     {/* Horizontal Player Name */}
                                     <div className="absolute left-0 right-0 top-[64%] sm:top-[68%] bottom-[22%] sm:bottom-[24%] flex items-center justify-center z-40 pointer-events-none w-full">
@@ -1803,15 +1773,13 @@ const AuctionPodium = () => {
                                     </div>
 
                                     {/* Stats Overlay at the Bottom */}
-                                    <div className="absolute right-0 bottom-0 top-[78%] sm:top-[76%] left-0 flex flex-col items-center justify-center pb-2 px-2 sm:px-4 z-20 pointer-events-none bg-gradient-to-t from-[#07090f] via-[#07090f]/95 to-[#07090f]/80 rounded-b-[12px]">
+                                    <div className="absolute right-0 bottom-0 top-[78%] sm:top-[76%] left-0 flex flex-col items-center justify-center pb-2 px-2 sm:px-4 z-20 pointer-events-none bg-gradient-to-t from-[#120a02] via-[#1a1205]/95 to-[#1a1205]/80 rounded-b-[12px]">
                                         {/* Dynamic Role-Based Stats Grid */}
                                         <div className="w-full h-full flex items-center justify-around px-2">
                                             {(() => {
                                                 const role = (currentPlayer.role || "").toLowerCase();
                                                 const s = currentPlayer.stats || {};
-
                                                 // Normalized Role Detection
-                                                const isBat = (role.includes("bat") || role.includes("bt")) && !role.includes("all") && !role.includes("wk") && !role.includes("wicket");
                                                 const isBowl = (role.includes("bowl") || role.includes("bw")) && !role.includes("all");
                                                 const isAll = role.includes("all") || role.includes("ar");
                                                 const isWK = role.includes("wk") || role.includes("wicket") || role.includes("keeper");
@@ -1885,10 +1853,71 @@ const AuctionPodium = () => {
                                 {/* Bidding Arena - Smaller top margin on mobile */}
                                 <div className="flex-1 flex w-full max-w-4xl mx-auto items-center justify-center mt-2 sm:mt-12 lg:mt-0 px-4">
                                     {/* Bidding Core */}
-                                    <div className="flex flex-row lg:flex-row items-center gap-4 sm:gap-6 lg:gap-16 w-full justify-center">
-                                        <div className="flex flex-col items-center lg:items-start text-center lg:text-left">
-                                            <div className="text-[9px] text-zinc-500 font-black uppercase tracking-[0.2em] mb-2 sm:mb-3">
-                                                Current Highest Bid
+                                    <div className="flex flex-row items-center gap-3 sm:gap-6 lg:gap-16 w-full justify-center">
+                                        <div className="flex flex-col items-center lg:items-start text-center lg:text-left flex-1 min-w-0">
+                                            {currentPlayer.rtmEligibleTeamName && (() => {
+                                                const rtmTeam = activeTeams?.find(
+                                                    (t) => t.teamName?.trim().toLowerCase() === currentPlayer.rtmEligibleTeamName?.trim().toLowerCase()
+                                                );
+                                                const themeColor = rtmTeam?.teamThemeColor || '#D4AF37';
+                                                const logo = rtmTeam?.teamLogo;
+                                                
+                                                return (
+                                                    <motion.div
+                                                        initial={{ opacity: 0, scale: 0.95 }}
+                                                        animate={{ opacity: 1, scale: 1 }}
+                                                        className="mb-4 w-full flex justify-center lg:justify-start"
+                                                    >
+                                                        <div 
+                                                            className="relative flex items-center gap-3 px-4 py-2 sm:px-5 sm:py-2.5 rounded-2xl border backdrop-blur-md shadow-xl transition-all duration-300 group hover:scale-[1.02]"
+                                                            style={{
+                                                                backgroundColor: `${themeColor}15`,
+                                                                borderColor: `${themeColor}40`,
+                                                                boxShadow: `0 8px 32px 0 rgba(0, 0, 0, 0.37), 0 0 15px ${themeColor}20`
+                                                            }}
+                                                        >
+                                                            {/* Decorative left accent line */}
+                                                            <div 
+                                                                className="absolute left-0 top-1/4 bottom-1/4 w-1 rounded-r-md transition-all duration-300 group-hover:h-[60%]"
+                                                                style={{ backgroundColor: themeColor }}
+                                                            />
+
+                                                            {/* Team Logo */}
+                                                            {logo ? (
+                                                                <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-white p-1 border flex items-center justify-center shadow-inner shrink-0 transition-transform group-hover:rotate-6"
+                                                                     style={{ borderColor: `${themeColor}50` }}>
+                                                                    <img 
+                                                                        src={logo} 
+                                                                        alt={rtmTeam?.teamName || "RTM Team"} 
+                                                                        className="w-full h-full object-contain filter drop-shadow-sm" 
+                                                                    />
+                                                                </div>
+                                                            ) : (
+                                                                <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-[#FFE58F] to-[#D4AF37] flex items-center justify-center font-black text-black text-xs shrink-0 shadow-md">
+                                                                    RTM
+                                                                </div>
+                                                            )}
+
+                                                            {/* Details */}
+                                                            <div className="flex flex-col text-left leading-tight pr-1">
+                                                                <div className="flex items-center gap-1.5">
+                                                                    <span className="w-1.5 h-1.5 rounded-full animate-ping" style={{ backgroundColor: themeColor }}></span>
+                                                                    <span className="text-[8px] sm:text-[9px] font-black uppercase tracking-[0.25em]" style={{ color: themeColor }}>
+                                                                        RTM Available
+                                                                    </span>
+                                                                </div>
+                                                                <div className="text-xs sm:text-sm font-black uppercase tracking-tight text-white mt-0.5 truncate max-w-[160px] sm:max-w-[220px]">
+                                                                    {rtmTeam?.teamName || currentPlayer.rtmEligibleTeamName}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </motion.div>
+                                                );
+                                            })()}
+                                            <div className="flex items-center gap-2 mb-2 sm:mb-3">
+                                                <div className="flex-1 h-px bg-gradient-to-r from-transparent via-[#D4AF37]/20 to-transparent" />
+                                                <div className="text-[8px] text-[#D4AF37]/50 font-black uppercase tracking-[0.25em] shrink-0">Current Highest Bid</div>
+                                                <div className="flex-1 h-px bg-gradient-to-r from-transparent via-[#D4AF37]/20 to-transparent" />
                                             </div>
 
                                             {currentBid.teamName ? (
@@ -1927,7 +1956,7 @@ const AuctionPodium = () => {
                                                             animate={{ scale: 1, opacity: 1 }}
                                                             className="text-2xl sm:text-6xl font-black font-serif tracking-tighter text-[#1a1205] drop-shadow-[0_2px_4px_rgba(0,0,0,0.3)] relative z-10"
                                                         >
-                                                            {fmtCr(currentBid.amount)}
+                                                            {fmt(currentBid.amount)}
                                                         </motion.div>
                                                     </div>
                                                 </div>
@@ -1936,7 +1965,7 @@ const AuctionPodium = () => {
                                                     <div className="absolute inset-[2px] bg-gradient-to-br from-[#E6B800] to-[#B38000] pointer-events-none z-0" style={{ clipPath: 'polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px)' }}></div>
                                                     <div className="absolute inset-0 bg-gradient-to-tr from-white/30 to-transparent pointer-events-none z-0"></div>
                                                     <div className="text-2xl sm:text-6xl font-black font-serif text-[#1a1205] tracking-tighter drop-shadow-[0_1px_1px_rgba(255,255,255,0.5)] relative z-10 leading-none">
-                                                        {fmtCr(currentPlayer.basePrice)}
+                                                        {fmt(currentPlayer.basePrice)}
                                                     </div>
                                                     <div className="mt-2 text-[9px] sm:text-xs font-black uppercase tracking-[0.25em] text-[#1a1205]/80 relative z-10">
                                                         Starting Price
@@ -1945,40 +1974,73 @@ const AuctionPodium = () => {
                                             )}
                                         </div>
 
-                                        {/* Premium Timer Circle OR Stamp */}
-                                        <div className="relative w-16 h-16 sm:w-32 sm:h-32 flex items-center justify-center shrink-0">
-                                            {!soldEvent ? (
-                                                <>
-                                                    <svg viewBox="0 0 128 128" className="w-full h-full transform -rotate-90 absolute scroll-smooth">
-                                                        <motion.circle
-                                                            cx="64"
-                                                            cy="64"
-                                                            r={ringRadius}
-                                                            fill="transparent"
-                                                            stroke="#FFD700"
-                                                            strokeWidth="3"
-                                                            strokeLinecap="round"
-                                                            strokeDasharray={ringCircumference}
-                                                            animate={{
-                                                                strokeDashoffset: timerDashoffset,
-                                                                stroke: timerColor,
-                                                            }}
-                                                            transition={{ duration: 1, ease: "linear" }}
-                                                            className=""
-                                                        />
-                                                    </svg>
+                                        {/* Timer column — stamp replaces timer in the exact same slot */}
+                                        <div className="flex flex-col items-center justify-start shrink-0 w-16 sm:w-28 md:w-32 self-center">
+                                            <AnimatePresence mode="wait">
+                                                {!soldEvent ? (
                                                     <motion.div
-                                                        key={`timer-${timer}`}
-                                                        animate={timer <= 3 ? { scale: [1, 1.2, 1] } : {}}
-                                                        className="text-sm xs:text-base sm:text-4xl font-black font-mono z-10"
-                                                        style={{ color: timerColor }}
+                                                        key="timer"
+                                                        initial={{ opacity: 0, scale: 0.9 }}
+                                                        animate={{ opacity: 1, scale: 1 }}
+                                                        exit={{ opacity: 0, scale: 0.9 }}
+                                                        transition={{ duration: 0.2 }}
+                                                        className="relative w-16 h-16 sm:w-28 sm:h-28 md:w-32 md:h-32 flex items-center justify-center"
                                                     >
-                                                        {timer}
+                                                        {timer <= 3 && (
+                                                            <motion.div
+                                                                animate={{ scale: [1, 1.35, 1], opacity: [0.4, 0, 0.4] }}
+                                                                transition={{ duration: 0.9, repeat: Infinity, ease: "easeInOut" }}
+                                                                className="absolute inset-0 rounded-full border-2 border-red-500/60 pointer-events-none"
+                                                            />
+                                                        )}
+                                                        <svg viewBox="0 0 128 128" className="w-full h-full transform -rotate-90 absolute">
+                                                            <defs>
+                                                                <filter id="glow-timer" x="-30%" y="-30%" width="160%" height="160%">
+                                                                    <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+                                                                    <feMerge>
+                                                                        <feMergeNode in="coloredBlur"/>
+                                                                        <feMergeNode in="SourceGraphic"/>
+                                                                    </feMerge>
+                                                                </filter>
+                                                            </defs>
+                                                            <circle
+                                                                cx="64"
+                                                                cy="64"
+                                                                r={ringRadius}
+                                                                fill="transparent"
+                                                                stroke="rgba(255,255,255,0.05)"
+                                                                strokeWidth="3"
+                                                            />
+                                                            <motion.circle
+                                                                cx="64"
+                                                                cy="64"
+                                                                r={ringRadius}
+                                                                fill="transparent"
+                                                                stroke="#FFD700"
+                                                                strokeWidth="3.5"
+                                                                strokeLinecap="round"
+                                                                strokeDasharray={ringCircumference}
+                                                                filter="url(#glow-timer)"
+                                                                animate={{
+                                                                    strokeDashoffset: timerDashoffset,
+                                                                    stroke: timerColor,
+                                                                }}
+                                                                transition={{ duration: 1, ease: "linear" }}
+                                                            />
+                                                        </svg>
+                                                        <motion.div
+                                                            key={`timer-${timer}`}
+                                                            animate={timer <= 3 ? { scale: [1, 1.15, 1] } : {}}
+                                                            transition={{ duration: 0.4, repeat: timer <= 3 ? Infinity : 0 }}
+                                                            className="text-sm xs:text-base sm:text-4xl font-black font-mono z-10 drop-shadow-[0_0_8px_rgba(255,215,0,0.3)]"
+                                                            style={{ color: timerColor }}
+                                                        >
+                                                            {timer}
+                                                        </motion.div>
                                                     </motion.div>
-                                                </>
-                                            ) : (
-                                                <AnimatePresence>
+                                                ) : (
                                                     <GavelSlam
+                                                        key="gavel-slam"
                                                         type={soldEvent.type}
                                                         playerName={
                                                             soldEvent.player?.player ||
@@ -2000,9 +2062,10 @@ const AuctionPodium = () => {
                                                             soldEvent.player?.image_path ||
                                                             soldEvent.player?.photoUrl
                                                         }
+                                                        currency={gameState?.currency}
                                                     />
-                                                </AnimatePresence>
-                                            )}
+                                                )}
+                                            </AnimatePresence>
                                         </div>
                                     </div>
                                 </div>
@@ -2014,200 +2077,358 @@ const AuctionPodium = () => {
 
                 {/* Mobile Podium Controls (Visible only on mobile Podium tab) */}
                 {
-                    activeTab === 'podium' && myTeam && (
-                        <div className="relative lg:hidden border-t border-[#D4AF37]/20 glass-panel p-2 xs:p-4 flex items-center justify-between z-50">
-                            <div className="flex items-center gap-3">
-                                {myTeam.teamLogo && (
-                                    <div className="w-10 h-10 rounded-lg bg-white flex items-center justify-center p-1 border border-[#D4AF37]/20 shadow-lg shrink-0">
-                                        <img src={myTeam.teamLogo} alt="" className="w-full h-full object-contain" />
+                    activeTab === 'podium' && (
+                        rtmState ? (() => {
+                            const playerPhoto = currentPlayer?.image_path ||
+                                currentPlayer?.imagepath ||
+                                currentPlayer?.photoUrl ||
+                                `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(rtmState?.playerName || "Player")}&backgroundColor=030712`;
+
+                            return (
+                                <div className="relative lg:hidden border-t border-[#D4AF37]/20 bg-[#16120a] p-3.5 flex flex-col gap-3.5 z-50 shadow-[0_-10px_25px_rgba(0,0,0,0.5)] animate-in slide-in-from-bottom duration-300">
+                                    <div className="flex items-center justify-between w-full">
+                                        <div className="flex items-center gap-3 min-w-0">
+                                            {/* Photo */}
+                                            <div className="w-12 h-12 rounded-lg overflow-hidden border border-amber-500/30 bg-black/40 shadow shrink-0">
+                                                <img 
+                                                    src={playerPhoto} 
+                                                    alt={rtmState.playerName} 
+                                                    className="w-full h-full object-cover object-top"
+                                                    onError={(e) => {
+                                                        e.target.src = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(rtmState?.playerName || "Player")}&backgroundColor=030712`;
+                                                    }}
+                                                />
+                                            </div>
+                                            {/* Name & price */}
+                                            <div className="flex flex-col text-left min-w-0">
+                                                <div className="text-[8px] text-amber-400 font-black tracking-widest uppercase mb-0.5">RTM Option Active</div>
+                                                <div className="text-sm font-black text-white uppercase truncate max-w-[145px] leading-tight">{rtmState.playerName}</div>
+                                                <div className="text-xs font-black text-amber-400 font-mono mt-0.5">{fmt(rtmState.bidAmount)}</div>
+                                            </div>
+                                        </div>
+                                        
+                                        {/* Timer & cards remaining */}
+                                        <div className="flex items-center gap-3">
+                                            {myTeam && myTeam.franchiseId === rtmState.prevTeamId && (
+                                                <div className="text-right">
+                                                    <div className="text-[7px] text-slate-400 font-bold uppercase tracking-wider">RTM Cards</div>
+                                                    <div className="text-xs font-black text-emerald-400 font-mono">
+                                                        {(myTeam.rtmCards || 0) - (myTeam.rtmUsedCount || 0)} left
+                                                    </div>
+                                                </div>
+                                            )}
+                                            <div className="flex flex-col items-center justify-center w-10 h-10 rounded-full bg-red-500/10 border border-red-500/30 text-red-500 animate-pulse">
+                                                <div className="text-sm font-black font-mono leading-none">{rtmState.timer}</div>
+                                            </div>
+                                        </div>
                                     </div>
-                                )}
-                                <div className="flex flex-col min-w-0 text-left">
-                                    <div className="text-[8px] font-black text-[#D4AF37]/60 uppercase tracking-widest leading-none mb-1">Signed As</div>
-                                    <div className="text-xs font-black text-[#FFE58F] uppercase truncate leading-none mb-1">{myTeam.teamName}</div>
-                                    <div className="text-[10px] font-bold text-[#FFE58F] leading-none">{fmtCr(myTeam.currentPurse)}</div>
+                                    {myTeam && myTeam.franchiseId === rtmState.prevTeamId ? (
+                                        <div className="flex gap-2 w-full">
+                                            <button
+                                                onClick={() => socket.emit("rtm_decision", { roomCode, useRtm: true })}
+                                                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white text-xs font-black uppercase tracking-wider border border-emerald-400/30 transition-all duration-300 active:scale-95 cursor-pointer animate-pulse"
+                                            >
+                                                USE RTM ({fmt(rtmState.bidAmount)})
+                                            </button>
+                                            <button
+                                                onClick={() => socket.emit("rtm_decision", { roomCode, useRtm: false })}
+                                                className="py-2.5 px-4 rounded-xl bg-slate-800 text-slate-300 text-xs font-black uppercase tracking-wider border border-slate-700 transition-all duration-300 active:scale-95 cursor-pointer"
+                                            >
+                                                PASS
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="text-center text-xs font-bold text-slate-400 py-1.5 border border-white/5 bg-white/5 rounded-xl">
+                                            Waiting for <span className="text-[#FFE58F] font-extrabold">{rtmState.prevTeamName}</span> to decide...
+                                        </div>
+                                    )}
                                 </div>
-                            </div>
-
-                            <div className="flex items-center gap-4">
-                                <div className="text-right mr-16 sm:mr-20">
-                                    <div className="text-[8px] font-black text-[#D4AF37]/60 uppercase tracking-widest leading-none mb-1">Next Bid</div>
-                                    <div className="text-lg font-black text-[#FFE58F] leading-none">{fmtCr(targetAmount)}</div>
+                            );
+                        })() : myTeam && (
+                            <div className="relative lg:hidden border-t border-[#D4AF37]/20 glass-panel p-2 xs:p-4 flex items-center justify-between z-50">
+                                <div className="flex items-center gap-3">
+                                    {myTeam.teamLogo && (
+                                        <div className="w-10 h-10 rounded-lg bg-white flex items-center justify-center p-1 border border-[#D4AF37]/20 shadow-lg shrink-0">
+                                            <img src={myTeam.teamLogo} alt="" className="w-full h-full object-contain" />
+                                        </div>
+                                    )}
+                                    <div className="flex flex-col min-w-0 text-left">
+                                        <div className="text-[8px] font-black text-[#D4AF37]/60 uppercase tracking-widest leading-none mb-1">Signed As</div>
+                                        <div className="text-xs font-black text-[#FFE58F] uppercase truncate leading-none mb-1">{myTeam.teamName}</div>
+                                        <div className="text-[10px] font-bold text-[#FFE58F] leading-none">{fmt(myTeam.currentPurse)}</div>
+                                    </div>
                                 </div>
-                                {/* Mobile Paddle: Round Logo Badge & Stick */}
-                                <div className="absolute bottom-0 right-2 xs:right-4 flex flex-col items-center justify-end z-30 pointer-events-none">
-                                    <button
-                                        onClick={handleBid}
-                                        disabled={
-                                            soldEvent || 
-                                            (myTeam.currentPurse < targetAmount) ||
-                                            (currentPlayer?.isOverseas && (myTeam?.playersAcquired?.filter(p => p.isOverseas || p.overseas).length >= 8))
-                                        }
-                                        className={`pointer-events-auto flex flex-col items-center group outline-none transition-all duration-300 origin-bottom hover:-translate-y-2 pb-0 ${soldEvent || (myTeam.currentPurse < targetAmount) || (currentPlayer?.isOverseas && (myTeam?.playersAcquired?.filter(p => p.isOverseas || p.overseas).length >= 8)) ? 'opacity-50 grayscale cursor-not-allowed' : 'active:scale-95'}`}
-                                    >
-                                        <div className="w-16 h-16 border-[2px] border-[#FFE58F]/80 bg-[#1a1205] shadow-[0_0_15px_rgba(0,0,0,0.8)] z-10 flex items-center justify-center rounded-full transition-all group-hover:shadow-[0_0_20px_rgba(251,191,36,0.6)] group-hover:border-[#FFF3B0] relative">
-                                            <div className="w-[88%] h-[88%] border border-[#FFF3B0]/50 shadow-inner flex items-center justify-center bg-gradient-to-br from-[#FFE58F] via-[#D4AF37] to-[#996515] rounded-full overflow-hidden relative">
-                                                <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/30 to-transparent pointer-events-none z-10"></div>
 
-                                                <div className="flex items-center justify-center absolute w-full h-full z-20">
-                                                    <div className="flex flex-col items-center justify-center text-center pt-0.5">
-                                                        {myTeam?.playersAcquired?.length >= 25 ? (
-                                                            <span className="text-[10px] font-black text-[#1a1205] leading-none uppercase drop-shadow-sm">FULL</span>
-                                                        ) : myTeam?.teamLogo ? (
-                                                            <>
-                                                                <img src={myTeam.teamLogo} alt="" className="w-8 h-8 object-contain drop-shadow-md mb-0.5" />
-                                                            </>
-                                                        ) : (
-                                                            <span className="text-[12px] font-black text-[#1a1205] uppercase tracking-tighter drop-shadow-sm font-serif">BID</span>
-                                                        )}
+                                <div className="flex items-center gap-4">
+                                    <div className="text-right mr-16 sm:mr-20">
+                                        <div className="text-[8px] font-black text-[#D4AF37]/60 uppercase tracking-widest leading-none mb-1">Next Bid</div>
+                                        <div className="text-lg font-black text-[#FFE58F] leading-none">{fmt(targetAmount)}</div>
+                                    </div>
+                                    {/* Mobile Paddle: Round Logo Badge & Stick */}
+                                    <div className="absolute bottom-0 right-2 xs:right-4 flex flex-col items-center justify-end z-30 pointer-events-none">
+                                        <button
+                                            onClick={handleBid}
+                                            disabled={
+                                                soldEvent || 
+                                                (myTeam.currentPurse < targetAmount) ||
+                                                (currentPlayer?.isOverseas && (myTeam?.playersAcquired?.filter(p => p.isOverseas || p.overseas).length >= maxOverseas))
+                                            }
+                                            className={`pointer-events-auto flex flex-col items-center group outline-none transition-all duration-300 origin-bottom hover:-translate-y-2 pb-0 ${soldEvent || (myTeam.currentPurse < targetAmount) || (currentPlayer?.isOverseas && (myTeam?.playersAcquired?.filter(p => p.isOverseas || p.overseas).length >= maxOverseas)) ? 'opacity-50 grayscale cursor-not-allowed' : 'active:scale-95'}`}
+                                        >
+                                            <div className="w-16 h-16 border-[2px] border-[#FFE58F]/80 bg-[#1a1205] shadow-[0_0_15px_rgba(0,0,0,0.8)] z-10 flex items-center justify-center rounded-full transition-all group-hover:shadow-[0_0_20px_rgba(251,191,36,0.6)] group-hover:border-[#FFF3B0] relative">
+                                                <div className="w-[88%] h-[88%] border border-[#FFF3B0]/50 shadow-inner flex items-center justify-center bg-gradient-to-br from-[#FFE58F] via-[#D4AF37] to-[#996515] rounded-full overflow-hidden relative">
+                                                    <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/30 to-transparent pointer-events-none z-10"></div>
+
+                                                    <div className="flex items-center justify-center absolute w-full h-full z-20">
+                                                        <div className="flex flex-col items-center justify-center text-center pt-0.5">
+                                                            {myTeam?.playersAcquired?.length >= maxSquad ? (
+                                                                <span className="text-[10px] font-black text-[#1a1205] leading-none uppercase drop-shadow-sm">FULL</span>
+                                                            ) : myTeam?.teamLogo ? (
+                                                                <>
+                                                                    <img src={myTeam.teamLogo} alt="" className="w-8 h-8 object-contain drop-shadow-md mb-0.5" />
+                                                                </>
+                                                            ) : (
+                                                                <span className="text-[12px] font-black text-[#1a1205] uppercase tracking-tighter drop-shadow-sm font-serif">BID</span>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                        {/* Golden Stick */}
-                                        <div className="w-3 h-10 -mt-2 bg-gradient-to-b from-[#FFE58F] via-[#D4AF37] to-[#805411] border-x-[1.5px] border-b-[1.5px] border-[#FFE58F]/80 z-0 transition-all relative"></div>
-                                    </button>
+                                            {/* Golden Stick */}
+                                            <div className="w-3 h-10 -mt-2 bg-gradient-to-b from-[#FFE58F] via-[#D4AF37] to-[#805411] border-x-[1.5px] border-b-[1.5px] border-[#FFE58F]/80 z-0 transition-all relative"></div>
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
+                        )
                     )
                 }
 
                 {/* Bottom Interaction Bar (Desktop Only) */}
-                <div className="hidden lg:flex h-28 bg-[linear-gradient(90deg,#2a1f00_0%,#d4af37_50%,#2a1f00_100%)] items-center justify-between px-12 z-20 shrink-0 shadow-[0_-10px_30px_rgba(0,0,0,0.8)] relative border-t border-[#FFE58F]/50">
-                    {/* Inner highlight line */}
-                    <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/30"></div>
-                    <div className="flex items-center gap-6">
-                        {myTeam && (
-                            <div className="flex items-center gap-5">
-                                <div
-                                    className="w-1.5 h-16 rounded-full"
-                                    style={{ backgroundColor: myTeam.teamThemeColor }}
-                                ></div>
-                                {myTeam.teamLogo && (
-                                    <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center p-2 border border-[#D4AF37]/20 shadow-lg shrink-0">
-                                        <img
-                                            src={myTeam.teamLogo}
-                                            alt={myTeam.teamName}
-                                            className="w-full h-full object-contain drop-shadow-md"
-                                        />
+                {rtmState ? (() => {
+                    const playerPhoto = currentPlayer?.image_path ||
+                        currentPlayer?.imagepath ||
+                        currentPlayer?.photoUrl ||
+                        `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(rtmState?.playerName || "Player")}&backgroundColor=030712`;
+                    
+                    return (
+                        <div className="hidden lg:flex h-28 bg-[#16120a] border-t border-[#D4AF37]/30 shadow-[0_-15px_30px_rgba(212,175,55,0.15)] items-center justify-between px-12 z-20 shrink-0 relative">
+                            {/* Left Section: Player Info & Photo & Price */}
+                            <div className="flex items-center gap-4">
+                                <div className="relative w-16 h-16 rounded-xl overflow-hidden border border-amber-500/30 bg-black/40 shadow-lg shrink-0">
+                                    <img 
+                                        src={playerPhoto} 
+                                        alt={rtmState.playerName} 
+                                        className="w-full h-full object-cover object-top"
+                                        onError={(e) => {
+                                            e.target.src = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(rtmState?.playerName || "Player")}&backgroundColor=030712`;
+                                        }}
+                                    />
+                                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent"></div>
+                                </div>
+                                
+                                <div className="flex flex-col text-left">
+                                    <span className="text-[9px] text-amber-400 font-black uppercase tracking-[0.25em] mb-0.5">
+                                        Right To Match
+                                    </span>
+                                    <div className="text-xl font-black text-white uppercase tracking-tight leading-none mb-1">
+                                        {rtmState.playerName}
                                     </div>
-                                )}
-                                <div className="flex flex-col justify-center min-w-0">
-                                    <div className="text-[10px] text-[#D4AF37]/60 font-black uppercase tracking-[0.2em] mb-1">
-                                        Signed As
-                                    </div>
-                                    <div
-                                        className="text-2xl font-black tracking-tight uppercase leading-none truncate text-[#FFE58F]"
-                                    >
-                                        {myTeam.teamName}
-                                    </div>
-                                    <div className="text-xs font-bold text-[#D4AF37]/60 uppercase tracking-[0.15em] mt-1.5 truncate">
-                                        {myTeam.ownerName}{" "}
-                                        <span className="text-[#D4AF37]/40 px-1">|</span>{" "}
-                                        <span className="text-[#FFE58F]">{fmtCr(myTeam.currentPurse)}</span>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Final Price:</span>
+                                        <span className="text-sm font-black font-mono text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded border border-amber-400/20 shadow-sm leading-none">
+                                            {fmt(rtmState.bidAmount)}
+                                        </span>
                                     </div>
                                 </div>
                             </div>
-                        )}
-                    </div>
 
-                    <div className="flex items-center gap-8 justify-end">
-                        {myTeam ? (
-                            <>
-                                <div className="text-right flex flex-col items-end mr-32 xl:mr-48 z-10 relative">
-                                    <div className="text-[10px] text-[#2c1d05] font-black uppercase tracking-widest mb-1">
-                                        Next Bid
+                            {/* Middle & Right: Actions */}
+                            {myTeam && myTeam.franchiseId === rtmState.prevTeamId ? (
+                                <div className="flex items-center gap-8">
+                                    <div className="flex flex-col items-end text-right">
+                                        <div className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mb-0.5">
+                                            RTM Cards Left
+                                        </div>
+                                        <div className="text-lg font-black text-emerald-400 font-mono">
+                                            {(myTeam.rtmCards || 0) - (myTeam.rtmUsedCount || 0)} Cards
+                                        </div>
                                     </div>
-                                    <div className="text-4xl font-black font-serif text-[#1a1103] tracking-tighter drop-shadow-[0_1px_1px_rgba(255,255,255,0.4)]">
-                                        {fmtCr(targetAmount)}
+
+                                    <div className="flex items-center gap-4">
+                                        <button
+                                            onClick={() => socket.emit("rtm_decision", { roomCode, useRtm: true })}
+                                            className="px-8 py-3.5 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white text-sm font-black uppercase tracking-wider border border-emerald-400/30 hover:border-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.35)] hover:shadow-[0_0_30px_rgba(16,185,129,0.5)] transition-all duration-300 active:scale-95 cursor-pointer animate-pulse"
+                                        >
+                                            USE RTM (Match {fmt(rtmState.bidAmount)})
+                                        </button>
+                                        <button
+                                            onClick={() => socket.emit("rtm_decision", { roomCode, useRtm: false })}
+                                            className="px-8 py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-black uppercase tracking-wider border border-slate-700 hover:border-slate-600 transition-all duration-300 active:scale-95 cursor-pointer"
+                                        >
+                                            PASS
+                                        </button>
+                                    </div>
+
+                                    <div className="flex flex-col items-center justify-center w-16 h-16 rounded-full bg-red-500/10 border border-red-500/30 text-red-500 animate-pulse shrink-0">
+                                        <div className="text-[9px] font-black uppercase tracking-widest leading-none mb-0.5">TIMER</div>
+                                        <div className="text-xl font-black font-mono leading-none">{rtmState.timer}</div>
                                     </div>
                                 </div>
-                                {/* Desktop Paddle: Round Logo Badge & Stick */}
-                                <div className="absolute bottom-[-4px] right-12 flex flex-col items-center justify-end z-30 pointer-events-none">
-                                    <button
-                                        onClick={handleBid}
-                                        disabled={
-                                            !myTeam ||
-                                            timer < 0 ||
-                                            soldEvent ||
-                                            targetAmount > (myTeam?.currentPurse || 0) ||
-                                            currentBid.teamId === myTeam?.franchiseId ||
-                                            myTeam?.playersAcquired?.length >= 25 ||
-                                            (currentPlayer?.isOverseas &&
-                                                (myTeam?.playersAcquired?.filter(p => p.isOverseas || p.overseas).length >= 8))
-                                        }
-                                        className={`
-                                        pointer-events-auto flex flex-col items-center group outline-none focus:outline-none hover:-translate-y-4 active:scale-95 transition-all duration-300 origin-bottom pb-0
-                                        ${!myTeam ||
+                            ) : (
+                                <div className="flex items-center gap-8 justify-end">
+                                    <div className="text-right flex flex-col items-end">
+                                        <div className="text-xs font-black text-amber-500 uppercase tracking-widest leading-none mb-1 animate-pulse">
+                                            RTM Phase Active
+                                        </div>
+                                        <div className="text-sm font-bold text-slate-400">
+                                            Waiting for {rtmState.prevTeamName} to decide...
+                                        </div>
+                                    </div>
+                                    <div className="flex flex-col items-center justify-center w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-500 animate-pulse shrink-0">
+                                        <div className="text-[9px] font-black uppercase tracking-widest leading-none mb-0.5">TIMER</div>
+                                        <div className="text-xl font-black font-mono leading-none">{rtmState.timer}</div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    );
+                })() : (
+                    <div className="hidden lg:flex h-28 bg-[linear-gradient(90deg,#2a1f00_0%,#d4af37_50%,#2a1f00_100%)] items-center justify-between px-12 z-20 shrink-0 shadow-[0_-10px_30px_rgba(0,0,0,0.8)] relative border-t border-[#FFE58F]/50">
+                        {/* Inner highlight line */}
+                        <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/30"></div>
+                        <div className="flex items-center gap-6">
+                            {myTeam && (
+                                <div className="flex items-center gap-5">
+                                    <div
+                                        className="w-1.5 h-16 rounded-full"
+                                        style={{ backgroundColor: myTeam.teamThemeColor }}
+                                    ></div>
+                                    {myTeam.teamLogo && (
+                                        <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center p-2 border border-[#D4AF37]/20 shadow-lg shrink-0">
+                                            <img
+                                                src={myTeam.teamLogo}
+                                                alt={myTeam.teamName}
+                                                className="w-full h-full object-contain drop-shadow-md"
+                                            />
+                                        </div>
+                                    )}
+                                    <div className="flex flex-col justify-center min-w-0">
+                                        <div className="text-[10px] text-[#D4AF37]/60 font-black uppercase tracking-[0.2em] mb-1">
+                                            Signed As
+                                        </div>
+                                        <div
+                                            className="text-2xl font-black tracking-tight uppercase leading-none truncate text-[#FFE58F]"
+                                        >
+                                            {myTeam.teamName}
+                                        </div>
+                                        <div className="text-xs font-bold text-[#D4AF37]/60 uppercase tracking-[0.15em] mt-1.5 truncate">
+                                            {myTeam.ownerName}{" "}
+                                            <span className="text-[#D4AF37]/40 px-1">|</span>{" "}
+                                            <span className="text-[#FFE58F]">{fmt(myTeam.currentPurse)}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="flex items-center gap-8 justify-end">
+                            {myTeam ? (
+                                <>
+                                    <div className="text-right flex flex-col items-end mr-32 xl:mr-48 z-10 relative">
+                                        <div className="text-[10px] text-[#2c1d05] font-black uppercase tracking-widest mb-1">
+                                            Next Bid
+                                        </div>
+                                        <div className="text-4xl font-black font-serif text-[#1a1103] tracking-tighter drop-shadow-[0_1px_1px_rgba(255,255,255,0.4)]">
+                                            {fmt(targetAmount)}
+                                        </div>
+                                    </div>
+                                    {/* Desktop Paddle: Round Logo Badge & Stick */}
+                                    <div className="absolute bottom-[-4px] right-12 flex flex-col items-center justify-end z-30 pointer-events-none">
+                                        <button
+                                            onClick={handleBid}
+                                            disabled={
+                                                !myTeam ||
                                                 timer < 0 ||
                                                 soldEvent ||
                                                 targetAmount > (myTeam?.currentPurse || 0) ||
                                                 currentBid.teamId === myTeam?.franchiseId ||
-                                                isPaused ||
-                                                myTeam?.playersAcquired?.length >= 25 ||
+                                                myTeam?.playersAcquired?.length >= maxSquad ||
                                                 (currentPlayer?.isOverseas &&
-                                                    (myTeam?.overseasCount || 0) >= 8)
-                                                ? "opacity-50 grayscale cursor-not-allowed"
-                                                : "cursor-pointer"
+                                                    (myTeam?.playersAcquired?.filter(p => p.isOverseas || p.overseas).length >= maxOverseas))
                                             }
-                                    `}
-                                    >
-                                        {/* Golden Round Paddle Outer Frame */}
-                                        <div className="w-40 h-40 border-[4px] border-[#FFE58F]/80 bg-[#1a1205] shadow-[0_0_35px_rgba(0,0,0,0.8)] z-10 flex items-center justify-center rounded-full transition-all group-hover:shadow-[0_0_45px_rgba(251,191,36,0.6)] group-hover:border-[#FFF3B0] relative">
-                                            {/* Pure Gold Inner Circle */}
-                                            <div className="w-[92%] h-[92%] border border-[#FFF3B0]/50 shadow-inner flex items-center justify-center bg-gradient-to-br from-[#FFE58F] via-[#D4AF37] to-[#996515] rounded-full overflow-hidden relative">
-                                                {/* Glossy Overlay */}
-                                                <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/30 to-transparent pointer-events-none z-10"></div>
+                                            className={`
+                                            pointer-events-auto flex flex-col items-center group outline-none focus:outline-none hover:-translate-y-4 active:scale-95 transition-all duration-300 origin-bottom pb-0
+                                            ${!myTeam ||
+                                                    timer < 0 ||
+                                                    soldEvent ||
+                                                    targetAmount > (myTeam?.currentPurse || 0) ||
+                                                    currentBid.teamId === myTeam?.franchiseId ||
+                                                    isPaused ||
+                                                    myTeam?.playersAcquired?.length >= maxSquad ||
+                                                    (currentPlayer?.isOverseas &&
+                                                        (myTeam?.overseasCount || 0) >= maxOverseas)
+                                                    ? "opacity-50 grayscale cursor-not-allowed"
+                                                    : "cursor-pointer"
+                                                }
+                                        `}
+                                        >
+                                            {/* Golden Round Paddle Outer Frame */}
+                                            <div className="w-40 h-40 border-[4px] border-[#FFE58F]/80 bg-[#1a1205] shadow-[0_0_35px_rgba(0,0,0,0.8)] z-10 flex items-center justify-center rounded-full transition-all group-hover:shadow-[0_0_45px_rgba(251,191,36,0.6)] group-hover:border-[#FFF3B0] relative">
+                                                {/* Pure Gold Inner Circle */}
+                                                <div className="w-[92%] h-[92%] border border-[#FFF3B0]/50 shadow-inner flex items-center justify-center bg-gradient-to-br from-[#FFE58F] via-[#D4AF37] to-[#996515] rounded-full overflow-hidden relative">
+                                                    {/* Glossy Overlay */}
+                                                    <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/30 to-transparent pointer-events-none z-10"></div>
 
-                                                {/* Content Container */}
-                                                <div className="flex items-center justify-center absolute w-full h-full z-20">
-                                                    <div className="flex flex-col items-center justify-center text-center mt-1 sm:mt-2">
-                                                        {myTeam?.playersAcquired?.length >= 25 ? (
-                                                            <span className="text-xl sm:text-2xl font-black text-[#1a1205] leading-none uppercase drop-shadow-sm">FULL</span>
-                                                        ) : myTeam?.teamLogo ? (
-                                                            <>
-                                                                <img src={myTeam.teamLogo} alt="" className="w-20 h-20 object-contain drop-shadow-md mb-0.5 hover:scale-105 transition-transform" />
-                                                            </>
-                                                        ) : (
-                                                            <span className="text-3xl sm:text-5xl font-black text-[#1a1205] uppercase tracking-tighter drop-shadow-sm font-serif">BID</span>
-                                                        )}
+                                                    {/* Content Container */}
+                                                    <div className="flex items-center justify-center absolute w-full h-full z-20">
+                                                        <div className="flex flex-col items-center justify-center text-center mt-1 sm:mt-2">
+                                                            {myTeam?.playersAcquired?.length >= maxSquad ? (
+                                                                <span className="text-xl sm:text-2xl font-black text-[#1a1205] leading-none uppercase drop-shadow-sm">FULL</span>
+                                                            ) : myTeam?.teamLogo ? (
+                                                                <>
+                                                                    <img src={myTeam.teamLogo} alt="" className="w-20 h-20 object-contain drop-shadow-md mb-0.5 hover:scale-105 transition-transform" />
+                                                                </>
+                                                            ) : (
+                                                                <span className="text-3xl sm:text-5xl font-black text-[#1a1205] uppercase tracking-tighter drop-shadow-sm font-serif">BID</span>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </div>
-                                        </div>
 
-                                        {/* Golden Stick */}
-                                        <div className="w-5 h-20 -mt-2 bg-gradient-to-b from-[#FFE58F] via-[#D4AF37] to-[#805411] border-x-[3px] border-b-[3px] border-[#FFE58F]/80 z-0 transition-all relative"></div>
+                                            {/* Golden Stick */}
+                                            <div className="w-5 h-20 -mt-2 bg-gradient-to-b from-[#FFE58F] via-[#D4AF37] to-[#805411] border-x-[3px] border-b-[3px] border-[#FFE58F]/80 z-0 transition-all relative"></div>
+                                        </button>
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="flex flex-col items-end gap-2 p-4 rounded-2xl bg-[#D4AF37]/5 border border-[#D4AF37]/20 relative overflow-hidden">
+                                    <div className="absolute top-0 right-0 w-32 h-32 bg-[#FFE58F]/10 blur-3xl rounded-full"></div>
+                                    <div className="text-xs font-black text-[#FFE58F] tracking-widest uppercase animate-pulse flex items-center gap-2">
+                                        <div className="w-2 h-2 rounded-full bg-[#FFE58F] shadow-[0_0_10px_#FFE58F]"></div>
+                                        Spectator Mode
+                                    </div>
+                                    <div className="text-[10px] font-bold text-[#D4AF37]/80 mb-2 mt-1 max-w-[200px] text-right">
+                                        You are watching the live auction. If a franchise has
+                                        disconnected, you can request to take over.
+                                    </div>
+                                    <button
+                                        onClick={handleRequestJoin}
+                                        disabled={hasRequested}
+                                        className={`px-4 py-2 text-xs font-black uppercase tracking-widest rounded-xl transition-all shadow-lg ${hasRequested
+                                            ? "bg-white/10 text-white/50 cursor-not-allowed border border-white/5"
+                                            : "bg-[#D4AF37] text-[#1a1205] hover:bg-[#FFE58F] hover:shadow-[0_0_15px_rgba(212,175,55,0.25)] cursor-pointer hover:scale-105"
+                                            }`}
+                                    >
+                                        {hasRequested ? "Request Pending..." : "Request to Join"}
                                     </button>
                                 </div>
-                            </>
-                        ) : (
-                            <div className="flex flex-col items-end gap-2 p-4 rounded-2xl bg-[#D4AF37]/5 border border-[#D4AF37]/20 relative overflow-hidden">
-                                <div className="absolute top-0 right-0 w-32 h-32 bg-[#FFE58F]/10 blur-3xl rounded-full"></div>
-                                <div className="text-xs font-black text-[#FFE58F] tracking-widest uppercase animate-pulse flex items-center gap-2">
-                                    <div className="w-2 h-2 rounded-full bg-[#FFE58F] shadow-[0_0_10px_#FFE58F]"></div>
-                                    Spectator Mode
-                                </div>
-                                <div className="text-[10px] font-bold text-[#D4AF37]/80 mb-2 mt-1 max-w-[200px] text-right">
-                                    You are watching the live auction. If a franchise has
-                                    disconnected, you can request to take over.
-                                </div>
-                                <button
-                                    onClick={handleRequestJoin}
-                                    disabled={hasRequested}
-                                    className={`px-4 py-2 text-xs font-black uppercase tracking-widest rounded-xl transition-all shadow-lg ${hasRequested
-                                        ? "bg-white/10 text-white/50 cursor-not-allowed border border-white/5"
-                                        : "bg-[#D4AF37] text-[#1a1205] hover:bg-[#FFE58F] hover:shadow-[0_0_15px_rgba(212,175,55,0.25)] cursor-pointer hover:scale-105"
-                                        }`}
-                                >
-                                    {hasRequested ? "Request Pending..." : "Request to Join"}
-                                </button>
-                            </div>
-                        )}
+                            )}
+                        </div>
                     </div>
-                </div>
-            </div >
+                )}
+            </div>
             {/* Right Sidebar: History & Chat */}
             <div className={`
                 fixed inset-y-0 right-0 z-[250] lg:relative lg:z-10 bg-[#1a1205]/95 lg:bg-[#1a1205] backdrop-blur-xl lg:backdrop-blur-none
@@ -2222,6 +2443,9 @@ const AuctionPodium = () => {
                 <div className="flex-1 flex flex-col relative overflow-hidden">
                     <ChatSection
                         chatMessages={chatMessages}
+                        recentSold={recentSold}
+                        unsoldHistory={unsoldHistory}
+                        auctionFeed={auctionFeed}
                         myTeam={myTeam}
                         chatEndRef={chatEndRef}
                         chatInput={chatInput}
@@ -2229,6 +2453,9 @@ const AuctionPodium = () => {
                         handleSendMessage={handleSendMessage}
                         isSpectator={!myTeam && gameState?.host !== socket.id}
                         onClose={() => setActiveTab('podium')}
+                        league={gameState?.league}
+                        currency={gameState?.currency}
+                        fmt={fmt}
                     />
                 </div>
             </div >
@@ -2954,7 +3181,7 @@ const AuctionPodium = () => {
                                                                 </div>
                                                             </div>
                                                         </div>
-                                                        <div className="text-sm font-mono font-black text-[#FFE58F]">{fmtCr(currentPlayer.basePrice)}</div>
+                                                        <div className="text-sm font-mono font-black text-[#FFE58F]">{fmt(currentPlayer.basePrice)}</div>
                                                     </div>
                                                 ) : (
                                                     <div className="col-span-2 text-center py-4 text-[#D4AF37]/50 text-xs font-bold italic">No active player on podium.</div>
@@ -2969,7 +3196,7 @@ const AuctionPodium = () => {
                                                 if (!acc[pool]) acc[pool] = [];
                                                 acc[pool].push(p);
                                                 return acc;
-                                            }, {})).map(([poolName, players], groupIdx) => (
+                                            }, {})).map(([poolName, players]) => (
                                                 <div key={poolName} className="space-y-4">
                                                     <div className="flex items-center gap-3">
                                                         <div className="h-[1px] flex-1 bg-gradient-to-r from-[#D4AF37]/50 to-transparent"></div>
@@ -2995,7 +3222,7 @@ const AuctionPodium = () => {
                                                                             {p.name || p.player}
                                                                         </div>
                                                                     </div>
-                                                                    <div className="text-[9px] font-mono font-black text-[#D4AF37]/60 group-hover:text-[#FFE58F]">{fmtCr(p.basePrice)}</div>
+                                                                    <div className="text-[9px] font-mono font-black text-[#D4AF37]/60 group-hover:text-[#FFE58F]">{fmt(p.basePrice)}</div>
                                                                 </div>
                                                             );
                                                         })}
@@ -3035,7 +3262,7 @@ const AuctionPodium = () => {
                                                                 </div>
                                                             </div>
                                                         </div>
-                                                        <div className="text-xs font-mono font-black text-[#D4AF37]">{fmtCr(p.basePrice)}</div>
+                                                        <div className="text-xs font-mono font-black text-[#D4AF37]">{fmt(p.basePrice)}</div>
                                                     </div>
                                                 ))}
                                             </div>
@@ -3093,8 +3320,8 @@ const AuctionPodium = () => {
                                                                     </div>
                                                                 </div>
                                                                 <div className="text-right">
-                                                                    <div className="text-sm font-mono font-black text-[#FFE58F]">{fmtCr(p.boughtFor)}</div>
-                                                                    <div className="text-[8px] font-bold text-[#D4AF37]/50 uppercase">Base: {fmtCr(p.basePrice || playerRecord.basePrice)}</div>
+                                                                    <div className="text-sm font-mono font-black text-[#FFE58F]">{fmt(p.boughtFor)}</div>
+                                                                    <div className="text-[8px] font-bold text-[#D4AF37]/50 uppercase">Base: {fmt(p.basePrice || playerRecord.basePrice)}</div>
                                                                 </div>
                                                             </div>
                                                         );
@@ -3130,7 +3357,7 @@ const AuctionPodium = () => {
                                                                     <div className="text-[8px] font-black text-[#D4AF37]/60 uppercase tracking-widest">{p.role || playerRecord.role || "Player"}</div>
                                                                 </div>
                                                             </div>
-                                                            <div className="text-right text-[10px] font-mono font-black text-[#D4AF37] uppercase">{fmtCr(p.basePrice || playerRecord.basePrice)}</div>
+                                                            <div className="text-right text-[10px] font-mono font-black text-[#D4AF37] uppercase">{fmt(p.basePrice || playerRecord.basePrice)}</div>
                                                         </div>
                                                     );
                                                 })

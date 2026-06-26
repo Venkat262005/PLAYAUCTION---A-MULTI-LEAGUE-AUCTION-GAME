@@ -1,5 +1,7 @@
 const Room = require('../models/Room');
 const Player = require('../models/Player');
+const { generateQuiz } = require('../services/quizEngine');
+const { buildQuizLeaderboard, getSafeQuizQuestion } = require('../utils/quizHelpers');
 const AuctionRoom = require('../models/AuctionRoom');
 const ActiveRoom = require('../models/ActiveRoom');
 const CompletedRoom = require('../models/CompletedRoom');
@@ -8,37 +10,62 @@ const AuctionTransaction = require('../models/AuctionTransaction');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { markDirty, flushRoom } = require('../services/dbWriter');
+const { getSA20PrevSquads, validateRetentions, calculateRetentionCosts, isUncappedPlayer, TEAM_NAME_MAP } = require('../services/sa20History');
+const { getWPLPrevSquads, validateWPLRetentions, calculateWPLRetentionCosts, isWPLUncappedPlayer, WPL_TEAM_NAME_MAP } = require('../services/wplHistory');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'ipl_auction_fallback_secret';
 
-const { normalizePlayer } = require('../utils/playerNormalizer');
+const SA20_OFFICIAL_BUDGETS = {
+    'DSG': { preSignedCost: 143.0,  remainingPurse: 197.0 },
+    'JSK': { preSignedCost: 244.0,  remainingPurse: 96.0  },
+    'MICT': { preSignedCost: 289.5, remainingPurse: 50.5  },
+    'PR':  { preSignedCost: 251.35, remainingPurse: 88.65 },
+    'PC':  { preSignedCost: 242.0,  remainingPurse: 98.0  },
+    'SEC': { preSignedCost: 144.0,  remainingPurse: 196.0 }
+};
 
-async function fetchAllPlayers() {
-    const collections = [
-        'marquee_batters',
-        'marquee_bowlers',
-        'marquee_allrounders',
-        'marquee_wicketkeepers',
-        'pool1_batters',
-        'pool1_bowlers',
-        'pool1_allrounders',
-        'pool1_wicketkeepers',
-        'Emerging_players',
-        'pool2_batters',
-        'pool2_bowlers',
-        'pool2_allrounders',
-        'pool2_wicketkeepers',
-        'pool3_batters',
-        'pool3_allrounders'
-    ];
+const { normalizePlayer, getCollectionsForLeague, mapTeamTakenToFranchise } = require('../utils/playerNormalizer');
+const { getMinIncrement, getRequiredBid, snapBidForLeague } = require('../utils/bidRules');
+const { isLegendPlayer } = require('../utils/legendRules');
+const { isSa20UncappedAcquired } = require('../utils/sa20PlayerRules');
+
+const isU23Player = (player) => {
+    if (!player) return false;
+    // 1. Explicit age check
+    const age = Number(player.age || player.Age);
+    if (!isNaN(age) && age > 0) {
+        return age <= 23;
+    }
+    // 2. Explicit U23 flag
+    if (player.isU23 === true || String(player.isU23).toLowerCase() === 'true') {
+        return true;
+    }
+    // 3. Pool check (Emerging or Rookie pools are usually U-23)
+    const pool = String(player.poolID || player.poolName || '').toLowerCase();
+    if (pool.includes('emerging') || pool.includes('rookie')) {
+        return true;
+    }
+    return false;
+};
+
+async function fetchAllPlayers(league = 'ipl') {
+    // Exclude presigned_players from live auctioning pool
+    const collections = getCollectionsForLeague(league).filter(c => c !== 'presigned_players');
 
     try {
         console.time("[DATA] Multi-fetch duration");
-        const db = mongoose.connection.client.db('ipl');
+        const dbName = league === 'sa20' ? 'SA20' : league;
+        const db = mongoose.connection.client.db(dbName);
 
         const poolResults = await Promise.all(
             collections.map(async (collName) => {
-                const players = await db.collection(collName).find({}).toArray();
+                // If collectionsList check shows this pool does not exist in this database, skip it
+                let players = [];
+                try {
+                    players = await db.collection(collName).find({}).toArray();
+                } catch (e) {
+                    return [];
+                }
 
                 // Shuffle players (Fisher-Yates)
                 for (let i = players.length - 1; i > 0; i--) {
@@ -56,12 +83,10 @@ async function fetchAllPlayers() {
         // The user explicitly requested that legends never appear at the start of the auction.
         for (let i = 0; i < Math.min(5, allPlayers.length); i++) {
             const pName = allPlayers[i].player || allPlayers[i].name || "";
-            if (LEGEND_NAMES.includes(pName)) {
-                // Find first non-legend from index 5 onwards to swap
+            if (isLegendPlayer(pName, league)) {
                 for (let j = 5; j < allPlayers.length; j++) {
                     const swapName = allPlayers[j].player || allPlayers[j].name || "";
-                    if (!LEGEND_NAMES.includes(swapName)) {
-                        // Swap legendary player further back
+                    if (!isLegendPlayer(swapName, league)) {
                         [allPlayers[i], allPlayers[j]] = [allPlayers[j], allPlayers[i]];
                         break;
                     }
@@ -79,37 +104,17 @@ async function fetchAllPlayers() {
 
 /**
  * findPlayerById — searches all pool collections for a player by _id.
- * This is the correct way to look up player data since players exist in
- * marquee, pool1_batsmen, pool1_bowlers, pool2_batsmen, pool2_bowlers,
- * pool3, and pool4 — NOT in a single Mongoose model collection.
  */
-const PLAYER_COLLECTIONS = [
-    'marquee_batters',
-    'marquee_bowlers',
-    'marquee_allrounders',
-    'marquee_wicketkeepers',
-    'pool1_batters',
-    'pool1_bowlers',
-    'pool1_allrounders',
-    'pool1_wicketkeepers',
-    'Emerging_players',
-    'pool2_batters',
-    'pool2_bowlers',
-    'pool2_allrounders',
-    'pool2_wicketkeepers',
-    'pool3_batters',
-    'pool3_allrounders'
-];
-
-async function findPlayerById(playerId) {
+async function findPlayerById(playerId, league = 'ipl') {
     if (!playerId) return null;
     const { ObjectId } = require('mongoose').Types;
     let oid;
     try { oid = new ObjectId(String(playerId)); } catch { return null; }
 
-    for (const collName of PLAYER_COLLECTIONS) {
-        // All new auction pools live in the 'ipl' database
-        const db = mongoose.connection.client.db('ipl');
+    const collections = getCollectionsForLeague(league);
+    for (const collName of collections) {
+        const dbName = league === 'sa20' ? 'SA20' : league;
+        const db = mongoose.connection.client.db(dbName);
         const doc = await db.collection(collName).findOne({ _id: oid });
         if (doc) return doc;
     }
@@ -119,22 +124,50 @@ async function findPlayerById(playerId) {
 
 
 const IPL_TEAMS = [
-    { id: 'MI', name: 'Mumbai Indians', color: '#004BA0', logoUrl: '/logos/MI.png' },
-    { id: 'CSK', name: 'Chennai Super Kings', color: '#FFFF3C', logoUrl: '/logos/CSK.png' },
-    { id: 'RCB', name: 'Royal Challengers Bengaluru', color: '#EC1C24', logoUrl: '/logos/RCB.png' },
-    { id: 'KKR', name: 'Kolkata Knight Riders', color: '#2E0854', logoUrl: '/logos/KKR.png' },
-    { id: 'DC', name: 'Delhi Capitals', color: '#00008B', logoUrl: '/logos/DC.png' },
-    { id: 'PBKS', name: 'Punjab Kings', color: '#ED1B24', logoUrl: '/logos/PBKS.png' },
-    { id: 'RR', name: 'Rajasthan Royals', color: '#EA1A85', logoUrl: '/logos/RR.png' },
-    { id: 'SRH', name: 'Sunrisers Hyderabad', color: '#FF822A', logoUrl: '/logos/SRH.png' },
-    { id: 'LSG', name: 'Lucknow Super Giants', color: '#00D1FF', logoUrl: '/logos/LSG.png' },
-    { id: 'GT', name: 'Gujarat Titans', color: '#1B2133', logoUrl: '/logos/GT.png' },
-    { id: 'DCG', name: 'Deccan Chargers', color: '#D1E1EF', logoUrl: '/logos/DCG.png' },
-    { id: 'KTK', name: 'Kochi Tuskers Kerala', color: '#F15A24', logoUrl: '/logos/KTK.png' },
-    { id: 'PWI', name: 'Pune Warriors India', color: '#40E0D0', logoUrl: '/logos/PWI.png' },
-    { id: 'RPS', name: 'Rising Pune Supergiant', color: '#D11D70', logoUrl: '/logos/RPS.png' },
-    { id: 'GL', name: 'Gujarat Lions', color: '#E04F16', logoUrl: '/logos/GL.png' },
-]; // 15 teams // 15 teams
+    { id: 'MI', name: 'Mumbai Indians', color: '#004BA0', logoUrl: '/ipl_logos/MI.png' },
+    { id: 'CSK', name: 'Chennai Super Kings', color: '#FFFF3C', logoUrl: '/ipl_logos/CSK.png' },
+    { id: 'RCB', name: 'Royal Challengers Bengaluru', color: '#EC1C24', logoUrl: '/ipl_logos/RCB.png' },
+    { id: 'KKR', name: 'Kolkata Knight Riders', color: '#2E0854', logoUrl: '/ipl_logos/KKR.png' },
+    { id: 'DC', name: 'Delhi Capitals', color: '#00008B', logoUrl: '/ipl_logos/DC.png' },
+    { id: 'PBKS', name: 'Punjab Kings', color: '#ED1B24', logoUrl: '/ipl_logos/PBKS.png' },
+    { id: 'RR', name: 'Rajasthan Royals', color: '#EA1A85', logoUrl: '/ipl_logos/RR.png' },
+    { id: 'SRH', name: 'Sunrisers Hyderabad', color: '#FF822A', logoUrl: '/ipl_logos/SRH.png' },
+    { id: 'LSG', name: 'Lucknow Super Giants', color: '#00D1FF', logoUrl: '/ipl_logos/LSG.png' },
+    { id: 'GT', name: 'Gujarat Titans', color: '#1B2133', logoUrl: '/ipl_logos/GT.png' },
+    { id: 'DCG', name: 'Deccan Chargers', color: '#D1E1EF', logoUrl: '/ipl_logos/DCG.png' },
+    { id: 'KTK', name: 'Kochi Tuskers Kerala', color: '#F15A24', logoUrl: '/ipl_logos/KTK.png' },
+    { id: 'PWI', name: 'Pune Warriors India', color: '#40E0D0', logoUrl: '/ipl_logos/PWI.png' },
+    { id: 'RPS', name: 'Rising Pune Supergiant', color: '#D11D70', logoUrl: '/ipl_logos/RPS.png' },
+    { id: 'GL', name: 'Gujarat Lions', color: '#E04F16', logoUrl: '/ipl_logos/GL.png' },
+]; // 15 teams
+
+const WPL_TEAMS = [
+    { id: 'MI', name: 'Mumbai Indians', color: '#004BA0', logoUrl: '/wpl_logos/MI.png' },
+    { id: 'DC', name: 'Delhi Capitals', color: '#00008B', logoUrl: '/wpl_logos/DC.png' },
+    { id: 'RCB', name: 'Royal Challengers Bangalore', color: '#EC1C24', logoUrl: '/wpl_logos/RCB.png' },
+    { id: 'GG', name: 'Gujarat Giants', color: '#E9571E', logoUrl: '/wpl_logos/Gujarat_Giants_WPL_logo.svg.png' },
+    { id: 'UPW', name: 'UP Warriorz', color: '#FFFF00', logoUrl: '/wpl_logos/UP_Warriors(z)_WPL_logo.png' }
+];
+
+const SA20_TEAMS = [
+    { id: 'DSG', name: "Durban's Super Giants", color: '#0A2240', logoUrl: '/sa20_logos/Durban\'s_Super_Giants_Logo.png' },
+    { id: 'JSK', name: 'Joburg Super Kings', color: '#FFCC00', logoUrl: '/sa20_logos/Joburg_Super_Kings_Logo.png' },
+    { id: 'MICT', name: 'MI Cape Town', color: '#004BA0', logoUrl: '/sa20_logos/MI_Cape_Town_–_Logo.png' },
+    { id: 'PR', name: 'Paarl Royals', color: '#DA1884', logoUrl: '/sa20_logos/Paarl_Royals_log0.png' },
+    { id: 'PC', name: 'Pretoria Capitals', color: '#00A3E0', logoUrl: '/sa20_logos/Pretoria_Capitals_logo.png' },
+    { id: 'SEC', name: 'Sunrisers Eastern Cape', color: '#F26522', logoUrl: '/sa20_logos/Sunrisers_Eastern_Cape_Logo.png' }
+];
+
+const getDb = (dbName) => {
+    const targetDb = dbName === 'sa20' ? 'SA20' : (dbName || 'ipl');
+    const mongoose = require('mongoose');
+    const baseConn = mongoose.connection;
+    const conn = baseConn.useDb(targetDb, { useCache: true });
+    if (!conn.db && baseConn.client) {
+        conn.db = baseConn.client.db(targetDb);
+    }
+    return conn;
+};
 
 // In-memory state for timers to avoid DB writes for every second
 const roomTimers = {};
@@ -156,17 +189,32 @@ const AI_BOTS = [
     { name: 'Bittu', userId: 'bot_bittu' },
     { name: 'Jojo', userId: 'bot_jojo' }
 ];
-const LEGEND_NAMES = [
-    "Virat Kohli", "MS Dhoni", "Rohit Sharma", 
-    "AB de Villiers", "Suresh Raina", "David Warner", "Chris Gayle", 
-    "Jasprit Bumrah", "Bhuvneshwar Kumar", "Lasith Malinga", "Yuzvendra Chahal", 
-    "Dale Steyn", "Hardik Pandya", "Ravindra Jadeja", "Kieron Pollard", 
-    "Andre Russell", "Dwayne Bravo", "Sachin Tendulkar", "Virender Sehwag"
-];
+
 const roomStates = {}; // Keep active room state in memory for fast access, flush to DB periodically / at end
 
+function normalizeLeague(league) {
+    return ['ipl', 'wpl', 'sa20'].includes(String(league || '').toLowerCase())
+        ? String(league).toLowerCase()
+        : 'ipl';
+}
+
+function getPublicRoomsList(leagueFilter = null) {
+    const normalizedFilter = leagueFilter ? normalizeLeague(leagueFilter) : null;
+
+    return Object.values(roomStates)
+        .filter(state => state.roomType === 'public' && state.status === 'Lobby')
+        .filter(state => !normalizedFilter || normalizeLeague(state.league) === normalizedFilter)
+        .map(state => ({
+            roomCode: state.roomCode,
+            hostName: state.hostName,
+            league: normalizeLeague(state.league),
+            teamsCount: state.teams.length,
+            maxTeams: state.availableTeams.length + state.teams.length // practically 15
+        }));
+}
+
 // Helper to strip heavy data from teams for broad broadcasts
-function lightweightTeams(teams = []) {
+function lightweightTeams(teams = [], league = 'ipl') {
     return teams.map(t => {
         const counts = (t.playersAcquired || []).reduce((acc, p) => {
             const role = (p.role || "").toLowerCase();
@@ -175,8 +223,13 @@ function lightweightTeams(teams = []) {
             else if (role.includes("bowl") || role.includes("bw")) acc.bowl++;
             else acc.bat++;
             if (p.isOverseas || p.overseas) acc.fr++;
+            if (league === 'sa20') {
+                if (isSa20UncappedAcquired(p)) acc.uncapped++;
+            } else if (isU23Player(p)) {
+                acc.u23++;
+            }
             return acc;
-        }, { bat: 0, bowl: 0, ar: 0, wk: 0, fr: 0 });
+        }, { bat: 0, bowl: 0, ar: 0, wk: 0, fr: 0, u23: 0, uncapped: 0 });
 
         // Explicitly pick fields to avoid circularity or excessive payload size
         return {
@@ -191,15 +244,34 @@ function lightweightTeams(teams = []) {
             isBot: !!t.isBot,
             acquiredCount: t.playersAcquired?.length || 0,
             roleCounts: counts,
+            rtmCards: t.rtmCards || 0,
+            rtmUsedCount: t.rtmUsedCount || 0,
             // Only include minimal data for acquired players if needed, or omit if count/roles are enough
             playersAcquired: (t.playersAcquired || []).map(p => ({
                 name: p.name,
                 role: p.role,
                 boughtFor: p.boughtFor,
-                isOverseas: p.isOverseas
+                isOverseas: p.isOverseas,
+                age: p.age,
+                isU23: league === 'sa20' ? false : isU23Player(p),
+                isUncapped: league === 'sa20' ? isSa20UncappedAcquired(p) : !!p.isUncapped,
+                poolID: p.poolID,
+                poolName: p.poolName
             }))
         };
     });
+}
+
+function getPresignedByTeam(state) {
+    return {};
+}
+
+function canonicalizePlayerName(name) {
+    if (!name) return '';
+    return name.trim().toLowerCase()
+        .replace(/\bdu\b/g, 'du')
+        .replace(/donavon/g, 'donovan')
+        .replace(/[^a-z0-9]/g, '');
 }
 
 function isModerator(state, socketId, userId) {
@@ -209,12 +281,205 @@ function isModerator(state, socketId, userId) {
     return isPrimary || isCoHost;
 }
 
+// ── Retention helpers ─────────────────────────────────────────────────────────
+
+/** Returns the correct retention service functions for a given league. */
+function getRetentionHelpers(league) {
+    if (league === 'wpl') {
+        return {
+            getPrevSquads:  getWPLPrevSquads,
+            validateFn:     validateWPLRetentions,
+            calculateFn:    calculateWPLRetentionCosts,
+            isUncappedFn:   isWPLUncappedPlayer,
+        };
+    } else { // sa20
+        return {
+            getPrevSquads:  getSA20PrevSquads,
+            validateFn:     validateRetentions,
+            calculateFn:    calculateRetentionCosts,
+            isUncappedFn:   isUncappedPlayer,
+        };
+    }
+}
+
+// ── Known Overseas Players Sets (Static cache for robust previous season retentions check) ──
+const WPL_OVERSEAS = new Set([
+    'Alana King', 'Alice Capsey', 'Alyssa Healy', 'Amelia Kerr', 'Annabel Sutherland',
+    'Ashleigh Gardner', 'Beth Mooney', 'Charli Knott', 'Chinelle Henry', 'Chloe Tryon',
+    'Dane van Niekerk', 'Dani Wyatt', 'Danielle Gibson', 'Danni Wyatt', 'Danni Wyatt-Hodge',
+    'Deandra Dottin', 'Ellyse Perry', 'Erin Burns', 'Georgia Voll', 'Georgia Wareham',
+    'Grace Harris', 'Hayley Matthews', 'Heather Graham', 'Heather Knight', 'Issy Wong',
+    'Jess Jonassen', 'Kate Cross', 'Kathryn Bryce', 'Kim Garth', 'Laura Harris',
+    'Laura Wolvaardt', 'Lauren Bell', 'Linsey Smith', 'Lizelle Lee', 'Lucy Hamilton',
+    'Marizanne Kapp', 'Meg Lanning', 'Megan Schutt', 'Milly Illingworth', 'Nadine de Klerk',
+    'Nat Sciver-Brunt', 'Nicola Carey', 'Phoebe Litchfield', 'Sarah Bryce', 'Shabnim Ismail',
+    'Sophia Dunkley', 'Sophie Devine', 'Sophie Ecclestone', 'Sophie Molineux', 'Tahlia McGrath',
+    'Tara Norris'
+]);
+
+const SA20_OVERSEAS = new Set([
+    'AM Ghazanfar', 'Adam Milne', 'Adam Rossington', 'Adil Rashid', 'Akeal Hosein',
+    'Akila Dananjaya', 'Alzarri Joseph', 'Andre Russell', 'Asa Tribe', 'Azmatullah Omarzai',
+    'Ben McDermott', 'Ben Stokes', 'Brandon King', 'Brydon Carse', 'Chris Benjamin',
+    'Chris Woakes', 'Chris Wood', 'Christopher Benjamin', 'Craig Overton', 'Dan Lawrence',
+    'Daniel Worrall', 'David Wiese', 'David Willey', 'Dawid Malan', 'Dilshan Madushanka',
+    'Doug Bracewell', 'Dunith Wellalage', 'Eoin Morgan', 'Eshan Malinga', 'Evin Lewis',
+    'Fabian Allen', 'George Garton', 'Gudakesh Motie', 'Harry Brook', 'James Coles',
+    'James Fuller', 'James Neesham', 'James Vince', 'Jason Holder', 'Jason Roy',
+    'Joe Root', 'Jofra Archer', 'John Turner', 'Johnson Charles', 'Jonny Bairstow',
+    'Jordan Cox', 'Jos Buttler', 'Josh Little', 'Kieron Pollard', 'Kusal Mendis',
+    'Kyle Mayers', 'Lewis Gregory', 'Liam Dawson', 'Liam Livingstone', 'Lorcan Tucker',
+    'Maheesh Theekshana', 'Marcus Stoinis', 'Mason Crane', 'Matheesha Pathirana',
+    'Matthew Potts', 'Matthew Wade', 'Moeen Ali', 'Mujeeb Ur Rahman', 'Naveen-ul-Haq',
+    'Nicholas Pooran', 'Noor Ahmad', 'Nuwan Thushara', 'Obed McCoy', 'Odean Smith',
+    'Olly Stone', 'Paul Stirling', 'Phil Salt', 'Rahmanullah Gurbaz', 'Rashid Khan',
+    'Reece Topley', 'Richard Gleeson', 'Romario Shepherd', 'Sam Cook', 'Sam Curran',
+    'Sam Hain', 'Saqib Mahmood', 'Shamar Joseph', 'Sherfane Rutherford', 'Sikandar Raza',
+    'Sunil Narine', 'Taijul Islam', 'Tim David', 'Tom Abell', 'Tom Banton',
+    'Tom Moores', 'Trent Boult', 'Vishen Halambage', 'Waqar Salamkheil', 'Wayne Madsen',
+    'Will Jacks', 'Will Smeed', 'Zahir Khan', 'Zak Crawley'
+]);
+
+/**
+ * Helper function to check if a historical player is an overseas player.
+ * Checks static lists of known overseas players first, then falls back to MongoDB collections.
+ */
+async function checkIsOverseas(playerName, league) {
+    if (!playerName) return false;
+    const pName = playerName.trim();
+    
+    // First, check static sets for instant synchronous hit
+    if (league === 'wpl' && WPL_OVERSEAS.has(pName)) return true;
+    if (league === 'sa20' && SA20_OVERSEAS.has(pName)) return true;
+
+    // Fall back to database query if not in static list
+    const collections = getCollectionsForLeague(league);
+    const dbName = league === 'sa20' ? 'SA20' : league;
+    
+    try {
+        const db = mongoose.connection.client.db(dbName);
+        const parts = pName.replace(/\s+/g, ' ').split(' ');
+        const firstName = parts[0];
+        const lastName = parts.slice(1).join(' ');
+
+        for (const collName of collections) {
+            const doc = await db.collection(collName).findOne({
+                $or: [
+                    { player: pName },
+                    { name: pName },
+                    { Player: pName },
+                    {
+                        $and: [
+                            { $or: [{ "First Name": firstName }, { First_Name: firstName }, { firstName: firstName }] },
+                            { $or: [{ Surname: lastName }, { surname: lastName }] }
+                        ]
+                    }
+                ]
+            });
+            if (doc) {
+                if (doc.isOverseas !== undefined) return !!doc.isOverseas;
+                const nat = String(doc.Country || doc.nationality || doc.Nationality || '').toLowerCase().trim();
+                if (league === 'sa20') {
+                    return nat !== '' && !['rsa', 'south africa', 'sa'].includes(nat);
+                } else {
+                    return nat !== '' && !['india', 'indian', 'ind'].includes(nat);
+                }
+            }
+        }
+    } catch (e) {
+        console.error(`[checkIsOverseas] Database query error for ${pName}:`, e.message);
+    }
+    return false;
+}
+
+/**
+ * Annotates raw squad data (array of strings) with isUncapped and isOverseas flags.
+ * Returns { [teamName]: [{name, isUncapped, isOverseas}, ...] }
+ */
+async function annotateSquads(squads, isUncappedFn, league) {
+    if (!squads) return null;
+    const result = {};
+    const promises = [];
+    for (const [teamName, players] of Object.entries(squads)) {
+        result[teamName] = [];
+        for (const name of players) {
+            promises.push((async () => {
+                const isOverseas = await checkIsOverseas(name, league);
+                result[teamName].push({
+                    name,
+                    isUncapped: isUncappedFn(name),
+                    isOverseas
+                });
+            })());
+        }
+    }
+    await Promise.all(promises);
+    return result;
+}
+
+/**
+ * Finds a team's retention squad from annotated retentionSquads,
+ * normalizing team names via the league's name map.
+ */
+function findTeamRetentionSquad(state, gameTeamName) {
+    const { retentionSquads, league } = state;
+    if (!retentionSquads) return null;
+    // Direct lookup
+    if (retentionSquads[gameTeamName]) return retentionSquads[gameTeamName];
+    // Normalized lookup
+    let normalizedName = gameTeamName;
+    if (league === 'sa20' && TEAM_NAME_MAP[gameTeamName])          normalizedName = TEAM_NAME_MAP[gameTeamName];
+    else if (league === 'wpl' && WPL_TEAM_NAME_MAP[gameTeamName])  normalizedName = WPL_TEAM_NAME_MAP[gameTeamName];
+    else if (league === 'ipl' && IPL_TEAM_NAME_MAP[gameTeamName])  normalizedName = IPL_TEAM_NAME_MAP[gameTeamName];
+    return retentionSquads[normalizedName] || null;
+}
+
+function getMaxRtmSlots(league) {
+    if (league === 'wpl') return 4;
+    if (league === 'sa20') return 5;
+    return 0;
+}
+
+function getTeamRtmCards(state, teamName) {
+    if (!state || !teamName) return 0;
+    if (state.league !== 'wpl' && state.league !== 'sa20') return 0;
+    if (!state.retentionSquads) return 0;
+
+    const squad = findTeamRetentionSquad(state, teamName);
+    if (!squad) return 0;
+
+    const selected = state.retentionsByTeam?.[teamName] || [];
+    const helpers = getRetentionHelpers(state.league);
+    const maxPossible = getMaxRtmSlots(state.league);
+    let cards = Math.max(0, maxPossible - selected.length + 1);
+
+    const retainedUncapped = selected.some((n) => helpers.isUncappedFn(n));
+    if (!retainedUncapped) {
+        cards = Math.max(cards, 1);
+    }
+
+    return cards;
+}
+
+function ensureTeamRtmFields(state, team) {
+    if (!team) return;
+    team.rtmUsedCount = team.rtmUsedCount || 0;
+    team.rtmCards = getTeamRtmCards(state, team.teamName);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Helper to emit consistent, full state to all room participants
 async function emitFullAuctionState(roomCode, io) {
     const state = roomStates[roomCode];
     if (!state) return;
 
-    const remainingTime = calculateRemainingTime(state);
+    let remainingTime;
+    if (state.status === 'RTM') {
+        remainingTime = state.rtmState?.timer || 0;
+    } else {
+        remainingTime = calculateRemainingTime(state);
+    }
 
     io.to(roomCode).emit('auction_state_sync', {
         status: state.status,
@@ -223,13 +488,61 @@ async function emitFullAuctionState(roomCode, io) {
         currentBid: state.currentBid,
         timer: Math.max(0, remainingTime),
         timerDuration: state.timerDuration,
-        teams: lightweightTeams(state.teams),
-        last5Bids: state.last5Bids || []
+        teams: lightweightTeams(state.teams, state.league),
+        last5Bids: state.last5Bids || [],
+        rtmState: state.rtmState || null
     });
 }
 
 function generateRoomCode() {
     return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+async function loadFranchises(targetLeague) {
+    const db = getDb(targetLeague);
+    let dbFranchises = [];
+    try {
+        dbFranchises = await db.collection('franchises').find().toArray();
+    } catch (e) {
+        console.log(`[DATA] Failed to query franchises from ${targetLeague} DB:`, e.message);
+    }
+
+    let normalizedFranchises = [];
+
+    if (dbFranchises && dbFranchises.length > 0) {
+        normalizedFranchises = dbFranchises.map(f => {
+            let logoUrl = f.logoUrl || f.logo_url || f.teamLogo || '';
+            if (logoUrl.startsWith('/logos/')) {
+                logoUrl = logoUrl.replace('/logos/', '/ipl_logos/');
+            }
+            return {
+                _id: f._id,
+                name: f.name,
+                shortName: f.shortName,
+                primaryColor: f.primaryColor,
+                logoUrl: logoUrl,
+                purseLimit: targetLeague === 'sa20' ? 410 : (f.purseLimit || (targetLeague === 'wpl' ? 1500 : 12000))
+            };
+        });
+    } else {
+        console.log(`[DATA] Franchise collection empty, using hardcoded fallback for ${targetLeague}`);
+        const fallbacks = targetLeague === 'sa20' ? SA20_TEAMS : (targetLeague === 'wpl' ? WPL_TEAMS : IPL_TEAMS);
+        normalizedFranchises = fallbacks.map(t => {
+            let logoUrl = t.logoUrl || '';
+            if (logoUrl.startsWith('/logos/')) {
+                logoUrl = logoUrl.replace('/logos/', '/ipl_logos/');
+            }
+            return {
+                _id: new mongoose.Types.ObjectId(),
+                name: t.name,
+                shortName: t.id,
+                primaryColor: t.color,
+                logoUrl: logoUrl,
+                purseLimit: targetLeague === 'sa20' ? 410 : (targetLeague === 'wpl' ? 1500 : 12000)
+            };
+        });
+    }
+    return normalizedFranchises;
 }
 
 async function rehydrateRoomState(roomCode) {
@@ -248,21 +561,30 @@ async function rehydrateRoomState(roomCode) {
                     roomCode: roomDoc.roomId,
                     purseLimit: roomDoc.purseLimit,
                     isAiMode: roomDoc.isAiMode,
+                    league: roomDoc.league || 'ipl',
+                    currency: roomDoc.currency || 'inr',
                     teamCount: roomDoc.teamCount || (roomDoc.franchisesInRoom || []).length,
                     hostUserId: roomDoc.hostUserId,
                     coHostUserIds: roomDoc.coHostUserIds || [],
-                    teams: (roomDoc.franchisesInRoom || []).map(t => ({
-                        franchiseId: t.franchiseId,
-                        teamName: t.teamName,
-                        teamThemeColor: t.teamThemeColor,
-                        teamLogo: t.logoUrl, // Mapped from logoUrl in AuctionRoom
-                        ownerUserId: t.ownerUserId,
-                        ownerSocketId: t.ownerSocketId,
-                        currentPurse: t.currentPurse,
-                        isBot: !!t.isBot
-                    })),
+                    teams: (roomDoc.franchisesInRoom || []).map(t => {
+                        let logo = t.logoUrl || t.teamLogo || '';
+                        if (logo.startsWith('/logos/')) {
+                            logo = logo.replace('/logos/', '/ipl_logos/');
+                        }
+                        return {
+                            franchiseId: t.franchiseId,
+                            teamName: t.teamName,
+                            teamThemeColor: t.teamThemeColor,
+                            teamLogo: logo, // Mapped from logoUrl in AuctionRoom
+                            ownerUserId: t.ownerUserId,
+                            ownerSocketId: t.ownerSocketId,
+                            currentPurse: t.currentPurse,
+                            isBot: !!t.isBot
+                        };
+                    }),
                     auctionStatus: roomDoc.status === 'Auctioning' ? 'ONGOING' : roomDoc.status,
-                    currentIndex: roomDoc.currentPlayerIndex
+                    currentIndex: roomDoc.currentPlayerIndex,
+                    auctionYear: roomDoc.auctionYear
                 });
             }
         }
@@ -272,19 +594,39 @@ async function rehydrateRoomState(roomCode) {
             return null;
         }
 
-        const allPlayers = await fetchAllPlayers();
+        const targetLeague = roomDoc.league || 'ipl';
+        const allPlayers = await fetchAllPlayers(targetLeague);
+        const normalizedFranchises = await loadFranchises(targetLeague);
+
+        // Map team logos for existing teams to ensure correct path
+        const mappedTeams = (roomDoc.teams || []).map(t => {
+            let logo = t.teamLogo || t.logoUrl || '';
+            if (logo.startsWith('/logos/')) {
+                logo = logo.replace('/logos/', '/ipl_logos/');
+            }
+            return {
+                ...t,
+                teamLogo: logo
+            };
+        });
+
+        // Filter availableTeams to exclude those already claimed in teams list
+        const claimedNames = mappedTeams.map(t => t.teamName);
+        const availableTeams = normalizedFranchises.filter(f => !claimedNames.includes(f.name));
         
         roomStates[roomCode] = {
             roomCode: roomDoc.roomCode || roomDoc.roomId,
             roomType: roomDoc.type || 'private',
             isAiMode: roomDoc.isAiMode || false,
+            league: targetLeague,
             hostUserId: roomDoc.hostUserId,
             status: roomDoc.auctionStatus || roomDoc.status || 'Lobby',
             players: allPlayers,
             currentIndex: roomDoc.currentIndex || roomDoc.currentPlayerIndex || 0,
-            teams: roomDoc.teams || [],
+            teams: mappedTeams,
             spectators: [],
             joinRequests: [],
+            availableTeams: availableTeams,
             coHostUserIds: roomDoc.coHostUserIds || [],
             currentBid: roomDoc.currentBid || {
                 amount: roomDoc.currentBidAmount || 0,
@@ -296,8 +638,20 @@ async function rehydrateRoomState(roomCode) {
             timerDuration: roomDoc.timerDuration || (roomDoc.purseLimit === 12000 ? 10 : 15),
             lastBidTime: roomDoc.lastBidTime || new Date(),
             isReAuctionRound: false,
-            unsoldHistory: roomDoc.unsoldHistory || []
+            unsoldHistory: roomDoc.unsoldHistory || [],
+            auctionYear: roomDoc.auctionYear
         };
+
+        // Reconstruct retention squads on rehydrate for WPL and SA20
+        if (roomDoc.auctionYear && (targetLeague === 'wpl' || targetLeague === 'sa20')) {
+            const firstYear = '2023';
+            if (roomDoc.auctionYear !== firstYear) {
+                const retHelpers = getRetentionHelpers(targetLeague);
+                const rawSquads = retHelpers.getPrevSquads(roomDoc.auctionYear);
+                const annotatedSquads = rawSquads ? await annotateSquads(rawSquads, retHelpers.isUncappedFn, targetLeague) : null;
+                roomStates[roomCode].retentionSquads = annotatedSquads;
+            }
+        }
 
         console.log(`[SESSION] Room ${roomCode} re-hydrated successfully. Status: ${roomStates[roomCode].status}`);
         return roomStates[roomCode];
@@ -345,7 +699,7 @@ function resumeAuction(roomCode, io) {
     
     if (state.timer <= 0) {
         console.log(`[RESUME] Room ${roomCode} finalize immediately (timer expired).`);
-        processHammerDown(roomCode, io);
+        checkAndTriggerRTM(roomCode, io);
         return;
     }
 
@@ -397,25 +751,6 @@ function ensureArray(val) {
     return [String(val)];
 }
 
-function getMinIncrement(poolID, currentAmount) {
-    const lowerPool = (poolID || '').toLowerCase();
-    const curAmt = currentAmount || 0;
-
-    if (lowerPool.startsWith('marquee') || lowerPool.includes('pool1')) {
-        // Marquee & Pool 1: flat 25L increment
-        return 25;
-    } else if (lowerPool.includes('emerging')) {
-        // Emerging: 5L (<2Cr), 10L (2-5Cr), 25L (>5Cr)
-        if (curAmt < 200) return 5;
-        if (curAmt < 500) return 10;
-        return 25;
-    } else if (lowerPool.includes('pool2') || lowerPool.includes('pool3') || lowerPool.includes('pool4')) {
-        // Pool 2, 3, 4: 10L (<5Cr), 25L (>5Cr)
-        return curAmt < 500 ? 10 : 25;
-    }
-    return 25; // fallback
-}
-
 async function handleAuctionEndTransition(roomCode, io) {
     const state = roomStates[roomCode];
     if (!state || state.status === 'Selection' || state.status === 'Finished') return;
@@ -447,8 +782,9 @@ async function handleAuctionEndTransition(roomCode, io) {
         ? Math.min(...remainingPlayers.map(p => p.basePrice || 20)) 
         : 20;
 
+    const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
     const allExhausted = state.teams.length > 0 && state.teams.every(t => {
-        return t.playersAcquired.length >= 25 || t.currentPurse < lowestRemainingPrice;
+        return t.playersAcquired.length >= maxSquad || t.currentPurse < lowestRemainingPrice;
     });
 
     if (allExhausted) {
@@ -462,8 +798,12 @@ async function handleAuctionEndTransition(roomCode, io) {
     // 1. Identify players for the INTEREST VOTING phase (Phase 1)
     // Only players from Pool 3 & 4 or Unsold History go to voting
     // [FIX] Using poolID instead of poolName to match data structure
+    const isWpl = state.league === 'wpl';
     const pool3And4 = state.players.slice(state.currentIndex).filter(p => {
         const pid = (p.poolID || "").toLowerCase();
+        if (isWpl) {
+            return pid.includes('uncapped');
+        }
         return pid.includes('pool3') || pid.includes('pool4');
     });
     const unsoldPlayers = state.unsoldHistory || [];
@@ -580,36 +920,264 @@ function finalizeManualEnd(roomCode, io) {
 }
 
 
+async function runTeamAiEvaluation(state) {
+    const { evaluateAllTeams } = require('../services/aiRating');
+
+    await Promise.all(state.teams.map(async (team, index) => {
+        const playersAcquired = team.playersAcquired || [];
+
+        const richPlayers = await Promise.all(playersAcquired.map(async (p) => {
+            const data = await findPlayerById(p.player, state.league || 'ipl');
+            const nat = (data?.nationality || "").toLowerCase().trim();
+            const isOverseas = Boolean(nat && !["india", "indian", "ind"].includes(nat));
+
+            const age = Number(data?.age || data?.Age || p.age || p.Age || 0);
+            const isU23Val = state.league !== 'sa20' && (
+                data?.isU23 || p.isU23 || (age > 0 && age <= 23) ||
+                String(data?.poolID || data?.poolName || p.poolID || p.poolName || '').toLowerCase().includes('emerging') ||
+                String(data?.poolID || data?.poolName || p.poolID || p.poolName || '').toLowerCase().includes('rookie')
+            );
+
+            const merged = {
+                ...p,
+                ...data,
+                name: data?.player || data?.name || p.name,
+                poolID: data?.poolID || p.poolID,
+                poolName: data?.poolName || p.poolName,
+            };
+
+            return {
+                player: p.player,
+                name: merged.name,
+                role: data?.role,
+                nationality: data?.nationality,
+                image_path: data?.image_path || data?.imagepath || data?.photoUrl,
+                isOverseas: isOverseas,
+                boughtFor: p.boughtFor,
+                points: data?.points || p.points || 0,
+                stats: data?.stats || {},
+                age: age > 0 ? age : undefined,
+                isU23: !!isU23Val,
+                isUncapped: state.league === 'sa20' ? isSa20UncappedAcquired(merged) : undefined,
+                poolID: merged.poolID,
+                poolName: merged.poolName
+            };
+        }));
+        state.teams[index].playersAcquired = richPlayers;
+    }));
+
+    const minSquadSize = state.league === 'wpl' ? 15 : (state.league === 'sa20' ? 17 : 15);
+
+    const qualifiedTeams = state.teams.filter(t => {
+        const size = t.playersAcquired?.length || 0;
+        if (size < minSquadSize) return false;
+        if (state.league === 'sa20') {
+            const uncappedCount = (t.playersAcquired || []).filter(p => isSa20UncappedAcquired(p)).length;
+            if (uncappedCount < 2) return false;
+        }
+        return true;
+    });
+
+    const disqualifiedTeams = state.teams.filter(t => !qualifiedTeams.includes(t));
+
+    disqualifiedTeams.forEach(t => {
+        const idx = state.teams.findIndex(st => st.teamName === t.teamName);
+        const size = t.playersAcquired?.length || 0;
+
+        let reason = `DISQUALIFIED: Squad size requirement (min ${minSquadSize}) not met.`;
+        let fixMessage = `Recruit more players to meet the minimum squad size of ${minSquadSize}.`;
+
+        if (state.league === 'sa20') {
+            const uncappedCount = (t.playersAcquired || []).filter(p => isSa20UncappedAcquired(p)).length;
+            if (size < 17) {
+                reason = "DISQUALIFIED: SA20 Squad size requirement (min 17 players) not met.";
+            } else if (uncappedCount < 2) {
+                reason = `DISQUALIFIED: SA20 Squad uncapped requirement (min 2 players, found ${uncappedCount}) not met.`;
+                fixMessage = "Ensure you draft and include at least 2 uncapped (domestic) players in your squad.";
+            }
+        }
+
+        state.teams[idx].evaluation = {
+            score: 0,
+            overallScore: 0,
+            titleProbability: "Weak",
+            analysis: {
+                batting_narrative: reason,
+                bowling_narrative: "Squad has failed key roster eligibility rules.",
+                tactical_balance: "Insufficient squad depth or dynamic eligibility compliance.",
+                key_risks_and_fixes: fixMessage
+            }
+        };
+    });
+
+    let evaluatedResults = [];
+    if (qualifiedTeams.length > 0) {
+        console.log(`[AI-BATCH] Dispatching unified analysis for ${qualifiedTeams.length} teams.`);
+        evaluatedResults = await evaluateAllTeams(qualifiedTeams.map(t => ({
+            teamId: t.teamName,
+            teamName: t.teamName,
+            playersAcquired: t.playersAcquired,
+            currentPurse: t.currentPurse
+        })));
+    }
+
+    state.teams.forEach((t, idx) => {
+        const res = evaluatedResults.find(r => r.teamId === t.teamName);
+        if (res) {
+            state.teams[idx].evaluation = res.evaluation;
+
+            if (res.bestXI && res.bestXI.playing11) {
+                const findId = (name) => {
+                    const p = t.playersAcquired.find(pa => pa.name === name);
+                    return p ? p.player : null;
+                };
+                state.teams[idx].playing11 = res.bestXI.playing11.map(name => findId(name)).filter(id => id);
+                state.teams[idx].impactPlayers = res.bestXI.impactPlayers.map(name => findId(name)).filter(id => id);
+            }
+        }
+    });
+}
+
+async function runQuizPhase(roomCode, io, state) {
+    const QUESTION_DURATION = 12;
+    const REVEAL_PAUSE = 2;
+    const questions = state.quiz.questions;
+
+    const getExpectedQuizResponders = () => {
+        const responderIds = new Set();
+        (state.teams || []).forEach((team) => {
+            if (team?.isBot) return;
+            if (team?.ownerUserId) responderIds.add(team.ownerUserId);
+            else if (team?.ownerSocketId) responderIds.add(team.ownerSocketId);
+        });
+        return Math.max(1, responderIds.size);
+    };
+
+    const closeCurrentQuizQuestion = (index) => {
+        if (!state.quiz || !state.quiz.active) return false;
+        if (state.quiz.currentQuestionIndex !== index) return false;
+        if (state.quiz.questionClosed) return false;
+
+        state.quiz.questionClosed = true;
+
+        if (state.quiz.questionTimerInterval) {
+            clearInterval(state.quiz.questionTimerInterval);
+            state.quiz.questionTimerInterval = null;
+        }
+
+        io.to(roomCode).emit('quiz_question_closed', {
+            quizIndex: state.quiz.questions[index].quizIndex,
+            correctIndex: state.quiz.questions[index].correctIndex,
+            correctAnswer: state.quiz.questions[index].options[state.quiz.questions[index].correctIndex],
+        });
+
+        if (typeof state.quiz.questionResolver === 'function') {
+            const resolve = state.quiz.questionResolver;
+            state.quiz.questionResolver = null;
+            resolve();
+        }
+        return true;
+    };
+
+    for (let i = 0; i < questions.length; i++) {
+        const q = questions[i];
+        state.quiz.currentQuestionIndex = i;
+        state.quiz.questionStartedAt = Date.now();
+        state.quiz.questionClosed = false;
+        state.quiz.currentQuestionAnsweredBy = new Set();
+
+        io.to(roomCode).emit('quiz_question', getSafeQuizQuestion(q, i, questions.length, QUESTION_DURATION));
+        io.to(roomCode).emit('quiz_leaderboard_update', { leaderboard: buildQuizLeaderboard(state.quiz.scores) });
+
+        const questionEnd = new Promise((resolve) => {
+            state.quiz.questionResolver = resolve;
+        });
+
+        state.quiz.questionTimerInterval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - state.quiz.questionStartedAt) / 1000);
+            const remaining = Math.max(0, QUESTION_DURATION - elapsed);
+
+            if (state.quiz.questionClosed) {
+                clearInterval(state.quiz.questionTimerInterval);
+                state.quiz.questionTimerInterval = null;
+                return;
+            }
+
+            io.to(roomCode).emit('quiz_timer_tick', { remaining, questionNumber: i + 1, totalQuestions: questions.length });
+            io.to(roomCode).emit('quiz_leaderboard_update', { leaderboard: buildQuizLeaderboard(state.quiz.scores) });
+
+            if (remaining <= 0) {
+                closeCurrentQuizQuestion(i);
+            }
+        }, 1000);
+
+        await questionEnd;
+
+        if (i < questions.length - 1) {
+            await new Promise((r) => setTimeout(r, REVEAL_PAUSE * 1000));
+        }
+    }
+
+    state.quiz.active = false;
+    state.quizLeaderboard = buildQuizLeaderboard(state.quiz.scores);
+    io.to(roomCode).emit('quiz_phase_ended', { leaderboard: state.quizLeaderboard });
+}
+
+
 async function finalizeResults(roomCode, io) {
     const state = roomStates[roomCode];
     if (!state) return;
-    if (state.status === 'Finished' || state.status === 'Evaluating' || state.isFinalizing) return;
+    if (state.status === 'Finished' || state.status === 'Evaluating' || state.status === 'Quiz' || state.isFinalizing) return;
     state.isFinalizing = true;
-    state.status = 'Evaluating';
 
-    // ── EVALUATION PHASE TIMER (240s) ──────────────────────────────────────
-    // Emit evaluation_started so the client swaps from "Selection Timer" to
-    // "Evaluation Timer" showing 240s counting down in the same spot.
-    const EVAL_DURATION = 240;
+    io.to(roomCode).emit('receive_chat_message', {
+        id: Date.now(),
+        senderName: 'System',
+        senderTeam: 'System',
+        senderColor: '#ef4444',
+        message: "Auction closed! Trivia showdown starting — then AI squad analysis.",
+        timestamp: new Date().toLocaleTimeString()
+    });
+
+    // ── PHASE 1: QUIZ (dedicated page) ─────────────────────────────────────
+    state.status = 'Quiz';
+    const quizQuestions = generateQuiz(state.league || 'ipl');
+    state.quiz = {
+        active: true,
+        questions: quizQuestions,
+        currentQuestionIndex: -1,
+        scores: {},
+        questionStartedAt: null,
+    };
+
+    io.to(roomCode).emit('quiz_phase_started', {
+        roomCode,
+        league: state.league || 'ipl',
+        totalQuestions: quizQuestions.length,
+    });
+
+    console.log(`[QUIZ] Phase started for room ${roomCode} (${quizQuestions.length} questions)`);
+    await runQuizPhase(roomCode, io, state);
+    console.log(`[QUIZ] Phase ended for room ${roomCode}`);
+
+    // ── PHASE 2: AI EVALUATION LOBBY ─────────────────────────────────────
+    state.status = 'Evaluating';
+    const EVAL_DURATION = 90;
     state.evaluationTimer = EVAL_DURATION;
     state.evaluationTimerEndsAt = Date.now() + (EVAL_DURATION * 1000);
 
     io.to(roomCode).emit('evaluation_started', { timer: EVAL_DURATION });
-    console.log(`[EVAL-TIMER] Evaluation phase started for room ${roomCode} (${EVAL_DURATION}s)`);
+    console.log(`[EVAL-TIMER] Evaluation lobby started for room ${roomCode} (${EVAL_DURATION}s)`);
 
     let evalDisplayTimer = EVAL_DURATION;
     const evalTimerInterval = setInterval(() => {
-        const now = Date.now();
-        const remaining = Math.max(0, Math.ceil((state.evaluationTimerEndsAt - now) / 1000));
+        const remaining = Math.max(0, Math.ceil((state.evaluationTimerEndsAt - Date.now()) / 1000));
         if (evalDisplayTimer !== remaining) {
             evalDisplayTimer = remaining;
             io.to(roomCode).emit('evaluation_timer_tick', { timer: remaining });
         }
-        if (remaining <= 0) {
-            clearInterval(evalTimerInterval);
-        }
+        if (remaining <= 0) clearInterval(evalTimerInterval);
     }, 500);
-    // ──────────────────────────────────────────────────────────────────────
 
     try {
         io.to(roomCode).emit('receive_chat_message', {
@@ -621,93 +1189,20 @@ async function finalizeResults(roomCode, io) {
             timestamp: new Date().toLocaleTimeString()
         });
 
-        // The AI evaluation is now a single batch call done synchronously below.
-        // No need to poll for background jobs.
+        await runTeamAiEvaluation(state);
 
-        const { evaluateAllTeams } = require('../services/aiRating');
-
-        // 1. Enrich ALL teams with full player data
-        await Promise.all(state.teams.map(async (team, index) => {
-            const playersAcquired = team.playersAcquired || [];
-            
-            // Enrich details from Database
-            const richPlayers = await Promise.all(playersAcquired.map(async (p) => {
-                const data = await findPlayerById(p.player);
-                const nat = (data?.nationality || "").toLowerCase().trim();
-                const isOverseas = Boolean(nat && !["india", "indian", "ind"].includes(nat));
-
-                return {
-                    player: p.player,
-                    name: data?.player || data?.name || p.name,
-                    role: data?.role,
-                    nationality: data?.nationality,
-                    image_path: data?.image_path || data?.imagepath || data?.photoUrl,
-                    isOverseas: isOverseas,
-                    boughtFor: p.boughtFor,
-                    points: data?.points || p.points || 0,
-                    stats: data?.stats || {}
-                };
-            }));
-            state.teams[index].playersAcquired = richPlayers;
-        }));
-
-        // 2. Identify QUALIFIED teams (>= 15 players)
-        const qualifiedTeams = state.teams.filter(t => (t.playersAcquired?.length || 0) >= 15);
-        const disqualifiedTeams = state.teams.filter(t => (t.playersAcquired?.length || 0) < 15);
-
-        // Handle Disqualified Teams
-        disqualifiedTeams.forEach(t => {
-            const idx = state.teams.findIndex(st => st.teamName === t.teamName);
-            state.teams[idx].evaluation = {
-                score: 0,
-                titleProbability: "Weak",
-                analysis: {
-                    batting_narrative: "DISQUALIFIED: Squad size requirement (min 15) not met.",
-                    bowling_narrative: "Squad is too thin to field a competitive IPL bowling attack.",
-                    tactical_balance: "Insufficient squad depth for tactical flexibility.",
-                    key_risks_and_fixes: "Recruit more players to meet minimum squad requirements."
-                }
-            };
-        });
-
-        // 3. Trigger BATCH AI Evaluation for qualified teams
-        let evaluatedResults = [];
-        if (qualifiedTeams.length > 0) {
-            console.log(`[AI-BATCH] Dispatching unified analysis for ${qualifiedTeams.length} teams.`);
-            evaluatedResults = await evaluateAllTeams(qualifiedTeams.map(t => ({
-                teamId: t.teamName,
-                teamName: t.teamName,
-                playersAcquired: t.playersAcquired,
-                currentPurse: t.currentPurse
-            })));
+        const timeToWaitMs = state.evaluationTimerEndsAt - Date.now();
+        if (timeToWaitMs > 0) {
+            console.log(`[EVAL-TIMER] AI completed early. Waiting ${Math.ceil(timeToWaitMs / 1000)}s...`);
+            await new Promise((resolve) => setTimeout(resolve, timeToWaitMs));
         }
-
-        // 4. Map Results back to State
-        state.teams.forEach((t, idx) => {
-            const res = evaluatedResults.find(r => r.teamId === t.teamName);
-            if (res) {
-                state.teams[idx].evaluation = res.evaluation;
-                
-                // Map BestXI back to team IDs (find IDs from enriched names/objects)
-                if (res.bestXI && res.bestXI.playing11) {
-                    const findId = (name) => {
-                        const p = t.playersAcquired.find(pa => pa.name === name);
-                        return p ? p.player : null;
-                    };
-                    state.teams[idx].playing11 = res.bestXI.playing11.map(name => findId(name)).filter(id => id);
-                    state.teams[idx].impactPlayers = res.bestXI.impactPlayers.map(name => findId(name)).filter(id => id);
-                }
-            }
-        });
 
         state.status = 'Finished';
         const finalizedTeams = [...state.teams];
 
-        // Final Sort and Rank
         finalizedTeams.sort((a, b) => (b.evaluation?.overallScore || 0) - (a.evaluation?.overallScore || 0));
         state.teams = finalizedTeams.map((t, i) => ({ ...t, rank: i + 1 }));
 
-        // Move to short-lived CompletedRoom storage (TTL)
         const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
         await CompletedRoom.create({
             roomCode,
@@ -723,30 +1218,30 @@ async function finalizeResults(roomCode, io) {
             expiresAt: expiresAt
         });
 
-        // Persist final results to AuctionRoom before cleaning up ActiveRoom
         await AuctionRoom.findOneAndUpdate(
             { roomId: roomCode },
-            { 
-                $set: { 
+            {
+                $set: {
                     status: 'Finished',
-                    franchisesInRoom: state.teams 
-                } 
+                    franchisesInRoom: state.teams,
+                    quizLeaderboard: state.quizLeaderboard || [],
+                }
             }
         );
 
-        // Cleanup ActiveRoom (Memory safety / Storage optimization)
         await ActiveRoom.deleteOne({ roomCode });
-        // await AuctionRoom.deleteOne({ roomId: roomCode }); // DO NOT delete legacy persistent record anymore
 
         console.log(`--- AUCTION FINISHED AND PERSISTED FOR ROOM ${roomCode} ---`);
-        io.to(roomCode).emit('auction_finished', { teams: state.teams });
+        io.to(roomCode).emit('auction_finished', {
+            teams: state.teams,
+            quizLeaderboard: state.quizLeaderboard || [],
+        });
 
     } catch (err) {
         console.error("Critical Error in finalizeResults:", err);
         io.to(roomCode).emit('error', 'Failed to generate final results');
     }
 
-    // Clean up both the selection timer and the evaluation countdown timer
     clearInterval(evalTimerInterval);
     if (roomTimers[roomCode]) {
         clearInterval(roomTimers[roomCode]);
@@ -864,15 +1359,7 @@ const setupSocketHandlers = (io) => {
 
     // Helper to broadcast active public rooms to all users currently in the Lobby menu
     const broadcastPublicRooms = () => {
-        const publicRooms = Object.values(roomStates)
-            .filter(state => state.roomType === 'public' && state.status === 'Lobby')
-            .map(state => ({
-                roomCode: state.roomCode,
-                hostName: state.hostName,
-                teamsCount: state.teams.length,
-                maxTeams: state.availableTeams.length + state.teams.length // practically 15
-            }));
-        io.emit('public_rooms_update', publicRooms);
+        io.emit('public_rooms_update', getPublicRoomsList());
     };
 
     io.on('connection', (socket) => {
@@ -880,50 +1367,54 @@ const setupSocketHandlers = (io) => {
 
 
         // Initial fetch for a newly connected client who is sitting in the lobby
-        socket.on('fetch_public_rooms', () => {
-            const publicRooms = Object.values(roomStates)
-                .filter(state => state.roomType === 'public' && state.status === 'Lobby')
-                .map(state => ({
-                    roomCode: state.roomCode,
-                    hostName: state.hostName,
-                    teamsCount: state.teams.length,
-                    maxTeams: state.availableTeams.length + state.teams.length
-                }));
-            socket.emit('public_rooms_update', publicRooms);
+        socket.on('fetch_public_rooms', ({ league } = {}) => {
+            socket.emit('public_rooms_update', getPublicRoomsList(league));
         });
 
         // Create Room (Host)
-        socket.on('create_room', async ({ roomType = 'private' }) => {
+        socket.on('create_room', async ({ roomType = 'private', league = 'ipl', currency, auctionYear }) => {
             // Read identity from the JWT-verified socket properties
             const playerName = socket.playerName;
             const userId = socket.userId;
             const isAiMode = roomType === 'ai';
             const effectiveRoomType = isAiMode ? 'private' : roomType;
+            const targetLeague = normalizeLeague(league);
+
+            // Default currencies: INR for IPL/WPL, ZAR for SA20. User can override with 'usd'.
+            const defaultCurrency = targetLeague === 'sa20' ? 'zar' : 'inr';
+            const validCurrencies = ['inr', 'usd', 'zar'];
+            const targetCurrency = validCurrencies.includes(String(currency || '').toLowerCase()) ? String(currency).toLowerCase() : defaultCurrency;
 
             try {
                 const roomCode = generateRoomCode();
 
-                // Fetch players from all pools and maintain pool order
-                const players = await fetchAllPlayers();
+                // ── All-league retention setup ─────────────────────────────────
+                const LEAGUE_VALID_YEARS = {
+                    ipl: ['2022', '2023', '2024', '2025'],
+                    wpl: ['2023', '2024', '2025', '2026'],
+                    sa20: ['2023', '2024', '2025', '2026'],
+                };
+                const LEAGUE_FIRST_YEAR = { ipl: '2022', wpl: '2023', sa20: '2023' };
+                const validYears = LEAGUE_VALID_YEARS[targetLeague] || [];
+                const targetYear  = validYears.includes(String(auctionYear)) ? String(auctionYear) : null;
+                const firstYear   = LEAGUE_FIRST_YEAR[targetLeague];
+                const retHelpers  = getRetentionHelpers(targetLeague);
+                // Only load retention squads if this isn't the first season of the league
+                const rawSquads = (targetYear && targetYear !== firstYear)
+                    ? retHelpers.getPrevSquads(targetYear)
+                    : null;
+                const annotatedSquads = rawSquads ? await annotateSquads(rawSquads, retHelpers.isUncappedFn, targetLeague) : null;
+                // ─────────────────────────────────────────────────────────────────
+
+                // Fetch players from correct league pools
+                const players = await fetchAllPlayers(targetLeague);
                 const playerIds = players.map(p => p._id);
 
-                // Fetch all 15 authentic IPL franchises from DB or fallback to hardcoded list
-                const dbFranchises = await Franchise.find().lean();
-                let normalizedFranchises = [];
+                // Fetch all franchises from correct database or hardcoded fallback
+                const normalizedFranchises = await loadFranchises(targetLeague);
 
-                if (dbFranchises && dbFranchises.length > 0) {
-                    normalizedFranchises = dbFranchises;
-                } else {
-                    console.log("[DATA] Franchise collection empty, using hardcoded fallback");
-                    normalizedFranchises = IPL_TEAMS.map(t => ({
-                        _id: new mongoose.Types.ObjectId(),
-                        name: t.name,
-                        shortName: t.id,
-                        primaryColor: t.color,
-                        logoUrl: t.logoUrl,
-                        purseLimit: 12000
-                    }));
-                }
+                const defaultTeamCount = targetLeague === 'sa20' ? 6 : (targetLeague === 'wpl' ? 5 : 15);
+
                 // AI Mode Logic: Handled in claim_team now
                 if (isAiMode) {
                     console.log("[AI-MODE] Room created, waiting for host to claim team before adding bots.");
@@ -940,10 +1431,13 @@ const setupSocketHandlers = (io) => {
                     currentPlayerIndex: 0,
                     hostUserId: userId,
                     hostName: playerName,
-                    isAiMode: isAiMode, // [NEW]
+                    isAiMode: isAiMode,
+                    league: targetLeague,
+                    currency: targetCurrency,
+                    auctionYear: targetYear,
                     allowSpectators: true,
                     maxSpectators: 10,
-                    teamCount: 15
+                    teamCount: defaultTeamCount
                 });
                 await newRoom.save();
 
@@ -954,7 +1448,9 @@ const setupSocketHandlers = (io) => {
                 roomStates[roomCode] = {
                     roomCode,
                     roomType: effectiveRoomType,
-                    isAiMode: isAiMode, // [NEW]
+                    isAiMode: isAiMode,
+                    league: targetLeague,
+                    currency: targetCurrency,
                     host: socket.id,
                     hostName: playerName,
                     hostUserId: userId,
@@ -973,10 +1469,25 @@ const setupSocketHandlers = (io) => {
                     unsoldHistory: [],
                     allowSpectators: true,
                     maxSpectators: 10,
-                    teamCount: 15
+                    teamCount: defaultTeamCount,
+                    auctionYear: targetYear,
+                    sa20Season: targetLeague === 'sa20' ? targetYear : null, // backward compat
+                    retentionSquads: annotatedSquads, // annotated: [{name, isUncapped}] per team
+                    retentionsByTeam: {},   // Tracks which team has submitted retentions
                 };
 
                 socket.emit('room_created', { roomCode, state: roomStates[roomCode] });
+
+                // Notify host of retention squads for all leagues
+                if (annotatedSquads) {
+                    socket.emit('retention_squads_loaded', { squads: annotatedSquads, auctionYear: targetYear, league: targetLeague });
+                }
+
+                // Send available teams + presigned metadata to the creator
+                socket.emit('available_teams', {
+                    teams: roomStates[roomCode].availableTeams,
+                    presignedByTeam: getPresignedByTeam(roomStates[roomCode])
+                });
 
                 // If this is a public room, broadcast it to the lobby menu globally
                 if (roomType === 'public') {
@@ -1094,7 +1605,7 @@ const setupSocketHandlers = (io) => {
                         console.log(`[SESSION] Re-linking co-host: ${playerName} (${userId})`);
                     }
 
-                    io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams) });
+                    io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams, state.league) });
                 }
 
                 // Add to spectators list if required
@@ -1114,7 +1625,7 @@ const setupSocketHandlers = (io) => {
                 const stateSummary = {
                     ...state,
                     players: hasPlayers ? state.players.map(p => ({ _id: p._id, name: p.name, player: p.player, poolName: p.poolName, basePrice: p.basePrice, imagepath: p.imagepath, image_path: p.image_path, photoUrl: p.photoUrl })) : [],
-                    teams: isActivePhase ? lightweightTeams(state.teams) : state.teams,
+                    teams: isActivePhase ? lightweightTeams(state.teams, state.league) : state.teams,
                     activePlayer: (hasPlayers && (state.status === 'Auctioning' || state.status === 'Paused')) ? state.players[state.currentIndex] : null,
                     activeBid: state.currentBid,
                     unsoldHistory: state.unsoldHistory || []
@@ -1122,6 +1633,26 @@ const setupSocketHandlers = (io) => {
 
                 socket.emit('room_joined', { roomCode, state: stateSummary });
                 io.to(roomCode).emit('spectator_update', { spectators: state.spectators || [] });
+
+                // Send available teams (with presigned metadata) to this joiner
+                if (state.status === 'Lobby') {
+                    socket.emit('available_teams', { teams: state.availableTeams, presignedByTeam: getPresignedByTeam(state) });
+                }
+
+                // Re-send retention squad for reconnecting team owners
+                if (state.retentionSquads && existingTeam && state.status === 'Lobby') {
+                    const squadData = findTeamRetentionSquad(state, existingTeam.teamName);
+                    if (squadData) {
+                        socket.emit('my_team_retention_squad', { squad: squadData, auctionYear: state.auctionYear, league: state.league });
+                        // If they already submitted retentions, confirm it
+                        const alreadySubmitted = state.retentionsByTeam && Object.prototype.hasOwnProperty.call(state.retentionsByTeam, existingTeam.teamName);
+                        if (alreadySubmitted) {
+                            const savedRetentions = state.retentionsByTeam[existingTeam.teamName];
+                            const savedCustomPrices = state.customPricesByTeam?.[existingTeam.teamName] || {};
+                            socket.emit('retentions_already_submitted', { retainedPlayers: savedRetentions, customPrices: savedCustomPrices });
+                        }
+                    }
+                }
 
                 // If the auction is live and this is a returning team owner or spectator,
                 // push follow-up details (like next players) immediately.
@@ -1132,13 +1663,33 @@ const setupSocketHandlers = (io) => {
                         console.log(`[SESSION] Pushing supplemental sync for "${currentPlayer.name || currentPlayer.player}" to socket ${socket.id}`);
                         socket.emit('new_player', {
                             player: currentPlayer,
-                            nextPlayers: nextPlayers.slice(0, 10), // Limit payload size to next 10 players
+                            nextPlayers: nextPlayers.slice(0, 10),
                             timer: state.timer
                         });
                         if (state.currentBid && state.currentBid.amount > 0) {
                             socket.emit('bid_placed', { currentBid: state.currentBid, timer: state.timer });
                         }
                     }
+                }
+
+                // Sync quiz phase for reconnecting clients
+                if (state.status === 'Quiz' && state.quiz?.active) {
+                    socket.emit('quiz_phase_started', {
+                        roomCode,
+                        league: state.league || 'ipl',
+                        totalQuestions: state.quiz.questions?.length || 10,
+                    });
+                    const idx = state.quiz.currentQuestionIndex;
+                    if (idx >= 0 && state.quiz.questions[idx]) {
+                        const q = state.quiz.questions[idx];
+                        socket.emit('quiz_question', getSafeQuizQuestion(q, idx, state.quiz.questions.length, 12));
+                    }
+                    socket.emit('quiz_leaderboard_update', { leaderboard: buildQuizLeaderboard(state.quiz.scores) });
+                }
+
+                if (state.status === 'Evaluating') {
+                    const remaining = Math.max(0, Math.ceil((state.evaluationTimerEndsAt - Date.now()) / 1000));
+                    socket.emit('evaluation_started', { timer: remaining || 90 });
                 }
 
                 // Broadcast current online map (team owners + spectators) using stable userId
@@ -1234,8 +1785,11 @@ const setupSocketHandlers = (io) => {
                     ownerUserId: userId,     // Permanent secure identifier
                     ownerName: playerName,   // Display name (can be duplicated, not used for auth)
                     currentPurse: assignedTeamDef.purseLimit,
+                    startingPurse: assignedTeamDef.purseLimit,
                     overseasCount: 0,
                     rtmUsed: false,
+                    rtmCards: getTeamRtmCards(state, assignedTeamDef.name),
+                    rtmUsedCount: 0,
                     playersAcquired: []
                 };
 
@@ -1251,17 +1805,25 @@ const setupSocketHandlers = (io) => {
                 }
 
                 // Broadcast updated list to everyone in lobby
-                io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams) });
+                io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams, state.league) });
                 io.to(roomCode).emit('spectator_update', { spectators: state.spectators || [] });
-                io.to(roomCode).emit('available_teams', { teams: state.availableTeams });
+                io.to(roomCode).emit('available_teams', { teams: state.availableTeams, presignedByTeam: getPresignedByTeam(state) });
 
                 // Acknowledge directly to the claiming user so they can stop their loading spinner
                 socket.emit('team_claimed_success');
 
+                // Send retention squad for this team (if retentions are enabled for this room)
+                if (state.retentionSquads) {
+                    const squadData = findTeamRetentionSquad(state, newTeamObj.teamName);
+                    if (squadData) {
+                        socket.emit('my_team_retention_squad', { squad: squadData, auctionYear: state.auctionYear, league: state.league });
+                    }
+                }
+
                 // Update authoritative DB state asynchronously (batched)
                 // Broadcast joining event (using markDirty for periodic flush)
                 markDirty(roomCode, { franchisesInRoom: state.teams });
-                io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams) });
+                io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams, state.league) });
                 if (state.roomType === 'public') {
                     broadcastPublicRooms();
                 }
@@ -1277,6 +1839,118 @@ const setupSocketHandlers = (io) => {
             }
         });
 
+        // ── Retention: Each team owner submits their chosen retained players ──────
+        // Works for ALL leagues: IPL (max 5 capped + 1 uncapped),
+        //                        WPL (max 4 capped + 1 uncapped),
+        //                        SA20 (max 4 capped + 1 uncapped)
+        socket.on('submit_retentions', ({ roomCode, retainedPlayers, customPrices }) => {
+            const state = roomStates[roomCode];
+            if (!state) return socket.emit('error', 'Room not found');
+            if (state.status !== 'Lobby') return socket.emit('error', 'Retentions can only be submitted in the lobby');
+            if (!state.retentionSquads) {
+                return socket.emit('error', 'No retention data available for this room');
+            }
+
+            // Find the team owned by this socket
+            const team = state.teams.find(t =>
+                (socket.userId && t.ownerUserId === socket.userId) || t.ownerSocketId === socket.id
+            );
+            if (!team) return socket.emit('error', 'You do not own a team in this room');
+
+            const selected = (retainedPlayers || []).map(String);
+
+            // Route validation to the correct league history service
+            const helpers = getRetentionHelpers(state.league);
+            const validation = helpers.validateFn(team.teamName, state.auctionYear, selected);
+            if (!validation.valid) {
+                return socket.emit('error', `Retention error: ${validation.error}`);
+            }
+
+            // Check overseas count (max 2 overseas players can be retained)
+            const squadData = findTeamRetentionSquad(state, team.teamName);
+            if (squadData) {
+                const selectedOverseas = selected.filter(name => {
+                    const playerObj = squadData.find(p => p.name === name);
+                    return playerObj?.isOverseas;
+                });
+                if (selectedOverseas.length > 2) {
+                    return socket.emit('error', `Retention error: Maximum 2 overseas players can be retained. Selected: ${selectedOverseas.join(', ')}`);
+                }
+            }
+
+            // Store retentions against this team (keyed by game team name)
+            if (!state.retentionsByTeam) state.retentionsByTeam = {};
+            state.retentionsByTeam[team.teamName] = selected;
+            team.rtmCards = getTeamRtmCards(state, team.teamName);
+            team.rtmUsedCount = team.rtmUsedCount || 0;
+
+            // Build cost breakdown for the UI confirmation
+            const cappedSelected   = selected.filter(n => !helpers.isUncappedFn(n));
+            const uncappedSelected = selected.filter(n =>  helpers.isUncappedFn(n));
+            const { breakdown } = helpers.calculateFn(cappedSelected, uncappedSelected[0] || null);
+
+            // Compute actual total cost using custom prices if provided
+            let totalCost = 0;
+            const validatedCustomPrices = {};
+            breakdown.forEach(({ name: pName, cost: defaultCost }) => {
+                const customCost = customPrices?.[pName];
+                const cost = (customCost !== undefined && customCost !== null && !isNaN(customCost) && customCost >= 0)
+                    ? Number(customCost)
+                    : defaultCost;
+                validatedCustomPrices[pName] = cost;
+                totalCost += cost;
+            });
+
+            // Validate total cost for maximum players
+            const maxCapped = state.league === 'wpl' ? 3 : 4;
+            const maxUncapped = 1;
+            const maxTotal = maxCapped + maxUncapped;
+
+            if (selected.length === maxTotal) {
+                const requiredTotal = state.league === 'wpl' ? 900 : 250; // WPL: 9Cr = 900 units, SA20: 25M = 250 units
+                if (totalCost !== requiredTotal) {
+                    const label = state.league === 'wpl' ? '₹9.00 Cr' : 'R 25.0M';
+                    return socket.emit('error', `Retention error: When retaining the maximum of ${maxTotal} players, the total spent must be exactly ${label}. Currently: ${totalCost}`);
+                }
+            }
+
+            // Verify total cost doesn't exceed starting purse limit
+            const startingPurse = team.startingPurse || (state.league === 'sa20' ? 410 : (state.league === 'wpl' ? 1500 : 12000));
+            if (totalCost > startingPurse) {
+                return socket.emit('error', `Retention error: Total retention cost (${totalCost} units) exceeds team purse limit (${startingPurse} units)`);
+            }
+
+            // Store validated custom prices
+            if (!state.customPricesByTeam) state.customPricesByTeam = {};
+            state.customPricesByTeam[team.teamName] = validatedCustomPrices;
+
+            const retentionDetails = breakdown.map(r => ({
+                name:       r.name,
+                isUncapped: r.isUncapped,
+                cost:       validatedCustomPrices[r.name],
+                slot:       r.slot
+            }));
+
+            // Confirm to the submitter
+            socket.emit('retentions_confirmed', { teamName: team.teamName, retentionDetails, totalCost });
+
+            // Broadcast retention status to everyone in the lobby (host can track progress)
+            const retentionStatus = {};
+            state.teams.forEach(t => {
+                retentionStatus[t.teamName] = Object.prototype.hasOwnProperty.call(state.retentionsByTeam, t.teamName)
+                    ? state.retentionsByTeam[t.teamName]
+                    : null;
+            });
+            io.to(roomCode).emit('lobby_retention_update', { 
+                retentionStatus,
+                customPricesByTeam: state.customPricesByTeam
+            });
+            io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams, state.league) });
+
+            const league = state.league.toUpperCase();
+            console.log(`[${league}-RETAIN] ${team.teamName} in room ${roomCode} retained: ${selected.join(', ') || 'none'}`);
+        });
+
         // Start Auction
         socket.on('start_auction', ({ roomCode }) => {
             const state = roomStates[roomCode];
@@ -1288,11 +1962,87 @@ const setupSocketHandlers = (io) => {
                 return socket.emit('error', 'At least one team must claim a franchise before auction can begin');
             }
 
+            // ── All-league retention: Apply retained players before starting ───────
+            // IPL: max 5 capped + 1 uncapped  |  WPL: max 4+1  |  SA20: max 4+1
+            if (state.retentionSquads && state.retentionsByTeam) {
+                const helpers = getRetentionHelpers(state.league);
+                const retainedNames = new Set();
+                const leagueTag = state.league.toUpperCase();
+
+                state.teams.forEach(team => {
+                    const selected = state.retentionsByTeam[team.teamName] || [];
+                    if (!selected.length) return;
+
+                    // Separate capped and uncapped retentions
+                    const cappedRetains   = selected.filter(n => !helpers.isUncappedFn(n));
+                    const uncappedRetains = selected.filter(n =>  helpers.isUncappedFn(n));
+
+                    const squadData = findTeamRetentionSquad(state, team.teamName);
+
+                    // Slot-based billing via league helper
+                    const { breakdown } = helpers.calculateFn(cappedRetains, uncappedRetains[0] || null);
+
+                    const teamCustomPrices = state.customPricesByTeam?.[team.teamName] || {};
+                    breakdown.forEach(({ name: pName, cost: defaultCost, isUncapped: uncapped }) => {
+                        const customCost = teamCustomPrices[pName];
+                        const cost = (customCost !== undefined && customCost !== null) ? customCost : defaultCost;
+                        const playerObj = squadData?.find(p => p.name === pName);
+                        const isOverseas = !!playerObj?.isOverseas;
+
+                        team.playersAcquired.push({
+                            player: null,       // No DB id — historical retention
+                            name: pName,
+                            role: 'Retained',
+                            nationality: isOverseas ? 'International' : 'Domestic',
+                            isOverseas: isOverseas,
+                            boughtFor: cost,
+                            isRetained: true,
+                            isUncapped: uncapped
+                        });
+                        if (isOverseas) {
+                            team.overseasCount = (team.overseasCount || 0) + 1;
+                        }
+                        team.currentPurse = Math.max(0, (team.currentPurse || 0) - cost);
+                        retainedNames.add(pName);
+                    });
+
+                    const totalCost = breakdown.reduce((s, p) => {
+                        const customCost = teamCustomPrices[p.name];
+                        const cost = (customCost !== undefined && customCost !== null) ? customCost : p.cost;
+                        return s + cost;
+                    }, 0);
+                    console.log(`[${leagueTag}-RETAIN] ${team.teamName}: retained ${breakdown.length} player(s), cost ${totalCost}. Purse: ${team.currentPurse}`);
+                });
+
+                // Remove retained players from the live auction pool (name-based)
+                if (retainedNames.size > 0) {
+                    const before = state.players.length;
+                    const canonicalRetained = new Set(
+                        [...retainedNames].map(name => canonicalizePlayerName(name))
+                    );
+                    state.players = state.players.filter(p => {
+                        const pName = p.player || p.name || '';
+                        return !canonicalRetained.has(canonicalizePlayerName(pName));
+                    });
+                    console.log(`[${leagueTag}-RETAIN] Removed ${before - state.players.length} retained players from auction pool.`);
+                }
+            }
+            // ─────────────────────────────────────────────────────────────────────
+
+            // Initialize RTM cards counts for each team
+            state.teams.forEach(team => ensureTeamRtmFields(state, team));
+
             state.status = 'Auctioning';
             io.to(roomCode).emit('auction_started', { state });
 
             // Mark status as dirty — will flush in next 30s window
-            markDirty(roomCode, { status: 'Auctioning' });
+            markDirty(roomCode, { status: 'Auctioning', franchisesInRoom: state.teams });
+
+            // Update ActiveRoom in mongo
+            ActiveRoom.updateOne(
+                { roomCode },
+                { $set: { auctionStatus: 'ONGOING', teams: state.teams } }
+            ).exec().catch(err => console.warn(`[START] ActiveRoom update failed:`, err.message));
 
             // Room has started, remove it from the public lobbies list
             if (state.roomType === 'public') {
@@ -1318,9 +2068,10 @@ const setupSocketHandlers = (io) => {
             // Determine Increment
             const currentPlayer = state.currentPlayer || {};
             const curAmt = state.currentBid.amount || 0;
-            const minIncrement = getMinIncrement(currentPlayer.poolID || '', curAmt);
-
-            const requiredBid = curAmt === 0 ? (currentPlayer.basePrice || 20) : curAmt + minIncrement;
+            const poolID = currentPlayer.poolID || '';
+            const basePrice = currentPlayer.basePrice || 20;
+            const requiredBid = getRequiredBid(curAmt, basePrice, poolID, state.league);
+            const bidAmount = snapBidForLeague(amount, state.league);
             // Use raw milliseconds for validation to avoid rounding issues in the last second.
             const remainingMs = state.timerEndsAt ? (state.timerEndsAt - Date.now()) : (state.timer * 1000);
 
@@ -1328,20 +2079,23 @@ const setupSocketHandlers = (io) => {
             // Allow bids until 1000ms after timer expiry (matching the -1s grace period in tickAuctionTimer)
             if (remainingMs < -1000) return socket.emit('error', 'Auction for this player has ended.');
             if (amount < requiredBid) return socket.emit('error', `Minimum bid is ${requiredBid}L`);
+            if (bidAmount < requiredBid) return socket.emit('error', `Minimum bid is ${requiredBid}L`);
             if (amount > team.currentPurse) return socket.emit('error', 'Insufficient purse limit');
-            if (team.playersAcquired.length >= 25) return socket.emit('error', 'Squad limit reached');
+            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
+            const maxOverseas = state.league === 'wpl' ? 6 : (state.league === 'sa20' ? 7 : 8);
+            if (team.playersAcquired.length >= maxSquad) return socket.emit('error', `Squad limit reached (Max ${maxSquad})`);
 
             // 1.1 Overseas Limit Check
             const overseasCount = (team.playersAcquired || []).filter(p => p.isOverseas || p.overseas).length;
             const playerIsOverseas = currentPlayer.isOverseas || currentPlayer.overseas;
-            if (playerIsOverseas && overseasCount >= 8) {
-                return socket.emit('error', 'Overseas player limit reached (Max 8)');
+            if (playerIsOverseas && overseasCount >= maxOverseas) {
+                return socket.emit('error', `Overseas player limit reached (Max ${maxOverseas})`);
             }
 
             // 2. IN-MEMORY STATE MUTATION (synchronous, race-safe via Node.js single thread)
             const now = new Date();
             state.currentBid = { 
-                amount, 
+                amount: bidAmount, 
                 teamId: team.franchiseId, 
                 teamName: team.teamName, 
                 teamColor: team.teamThemeColor, 
@@ -1355,7 +2109,7 @@ const setupSocketHandlers = (io) => {
 
             // Track bid history in memory
             if (!state.last5Bids) state.last5Bids = [];
-            state.last5Bids = [...state.last5Bids, { amount, teamName: team.teamName, timestamp: now }].slice(-5);
+            state.last5Bids = [...state.last5Bids, { amount: bidAmount, teamName: team.teamName, timestamp: now }].slice(-5);
 
             // 3. Broadcast to all clients immediately
             emitFullAuctionState(roomCode, io);
@@ -1365,19 +2119,33 @@ const setupSocketHandlers = (io) => {
                 { roomCode },
                 {
                     $set: {
-                        currentBid: { amount, teamId: team.franchiseId, teamName: team.teamName, ownerUserId: team.ownerUserId },
+                        currentBid: { amount: bidAmount, teamId: team.franchiseId, teamName: team.teamName, ownerUserId: team.ownerUserId },
                         lastBidTime: now,
                         auctionStatus: 'ONGOING'
                     },
                     $push: {
                         last5Bids: {
-                            $each: [{ amount, teamName: team.teamName, timestamp: now }],
+                            $each: [{ amount: bidAmount, teamName: team.teamName, timestamp: now }],
                             $slice: -5
                         }
                     }
                 },
                 { upsert: true, returnDocument: 'before' }
             ).catch(err => console.warn(`[BID] DB persist failed for ${roomCode}:`, err.message));
+        });
+
+        // RTM Decision
+        socket.on('rtm_decision', async ({ roomCode, useRtm }) => {
+            const state = roomStates[roomCode];
+            if (!state || state.status !== 'RTM' || !state.rtmState) return;
+
+            // Security check: Only the franchise owner of the RTM team can decide
+            if (state.rtmState.prevTeamOwnerUserId !== socket.userId) {
+                return socket.emit('error', 'Only the previous franchise owner of this player can make the RTM decision.');
+            }
+
+            console.log(`[RTM-USER] User ${socket.userId} decided to ${useRtm ? 'USE' : 'PASS'} RTM for ${state.rtmState.playerName}`);
+            await handleRtmDecision(roomCode, io, useRtm);
         });
 
         // Skip Player (AI Mode Only)
@@ -1453,6 +2221,70 @@ const setupSocketHandlers = (io) => {
             if (player) {
                 socket.emit('new_player', { player, nextPlayers, timer: state.timer });
                 socket.emit('bid_placed', { currentBid: state.currentBid, timer: state.timer });
+            }
+        });
+
+        // --- QUIZ HANDLER ---
+        socket.on('submit_quiz_answer', ({ roomCode, quizIndex, answerIndex }) => {
+            const state = roomStates[roomCode];
+            if (!state || !state.quiz || !state.quiz.active) return;
+
+            const q = state.quiz.questions.find(x => x.quizIndex === quizIndex);
+            if (!q) return;
+            if (state.quiz.currentQuestionIndex !== state.quiz.questions.findIndex(x => x.quizIndex === quizIndex)) return;
+
+            const userId = socket.userId || socket.id;
+            const userName = socket.playerName || 'Guest';
+
+            if (!state.quiz.scores[userId]) {
+                state.quiz.scores[userId] = { name: userName, score: 0, answered: [], responseTimes: [], correctCount: 0 };
+            }
+
+            const userScoreObj = state.quiz.scores[userId];
+            if (userScoreObj.answered.includes(quizIndex)) return;
+
+            const responseMs = Math.max(0, Date.now() - (state.quiz.questionStartedAt || Date.now()));
+            userScoreObj.answered.push(quizIndex);
+            userScoreObj.responseTimes.push({ quizIndex, ms: responseMs });
+
+            if (!state.quiz.currentQuestionAnsweredBy) state.quiz.currentQuestionAnsweredBy = new Set();
+            state.quiz.currentQuestionAnsweredBy.add(userId);
+
+            if (q.correctIndex === answerIndex) {
+                userScoreObj.score += q.points;
+                userScoreObj.correctCount += 1;
+                if (userScoreObj.score > 12 && !userScoreObj.bonusAwarded) {
+                    userScoreObj.score += 1;
+                    userScoreObj.bonusAwarded = true;
+                }
+                socket.emit('quiz_answer_result', { quizIndex, correct: true, pointsAdded: q.points, responseMs });
+            } else {
+                socket.emit('quiz_answer_result', { quizIndex, correct: false, pointsAdded: 0, correctIndex: q.correctIndex, responseMs });
+            }
+
+            io.to(roomCode).emit('quiz_leaderboard_update', { leaderboard: buildQuizLeaderboard(state.quiz.scores) });
+
+            const expectedResponders = Math.max(1, new Set((state.teams || []).filter((team) => !team?.isBot).map((team) => team.ownerUserId || team.ownerSocketId).filter(Boolean)).size);
+            if ((state.quiz.currentQuestionAnsweredBy?.size || 0) >= expectedResponders) {
+                const currentQuestionIndex = state.quiz.currentQuestionIndex;
+                const currentQuestion = state.quiz.questions[currentQuestionIndex];
+                if (currentQuestion && !state.quiz.questionClosed) {
+                    state.quiz.questionClosed = true;
+                    if (state.quiz.questionTimerInterval) {
+                        clearInterval(state.quiz.questionTimerInterval);
+                        state.quiz.questionTimerInterval = null;
+                    }
+                    io.to(roomCode).emit('quiz_question_closed', {
+                        quizIndex: currentQuestion.quizIndex,
+                        correctIndex: currentQuestion.correctIndex,
+                        correctAnswer: currentQuestion.options[currentQuestion.correctIndex],
+                    });
+                    if (typeof state.quiz.questionResolver === 'function') {
+                        const resolve = state.quiz.questionResolver;
+                        state.quiz.questionResolver = null;
+                        resolve();
+                    }
+                }
             }
         });
 
@@ -1587,8 +2419,8 @@ const setupSocketHandlers = (io) => {
             }
 
             socket.leave(roomCode);
-            io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams) });
-            io.to(roomCode).emit('available_teams', { teams: state.availableTeams });
+            io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams, state.league) });
+            io.to(roomCode).emit('available_teams', { teams: state.availableTeams, presignedByTeam: getPresignedByTeam(state) });
             broadcastPublicRooms();
         });
 
@@ -1649,8 +2481,8 @@ const setupSocketHandlers = (io) => {
             if (targetSocket) targetSocket.leave(roomCode);
 
             // Notify everyone else
-            io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams) });
-            io.to(roomCode).emit('available_teams', { teams: state.availableTeams });
+            io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams, state.league) });
+            io.to(roomCode).emit('available_teams', { teams: state.availableTeams, presignedByTeam: getPresignedByTeam(state) });
         });
 
         // Pause / Resume
@@ -1794,7 +2626,9 @@ const setupSocketHandlers = (io) => {
             if (typeof allowSpectators === 'boolean') state.allowSpectators = allowSpectators;
             if (typeof maxSpectators === 'number') state.maxSpectators = Math.min(10, Math.max(1, maxSpectators));
             if (typeof teamCount === 'number') {
-                if ([10, 15].includes(teamCount)) {
+                const targetLeague = String(state.league || '').toLowerCase();
+                const validCounts = targetLeague === 'sa20' ? [6] : (targetLeague === 'wpl' ? [5] : [10, 15]);
+                if (validCounts.includes(teamCount)) {
                     state.teamCount = teamCount;
                 }
             }
@@ -2113,8 +2947,9 @@ function loadNextPlayer(roomCode, io) {
         return bp < min ? bp : min;
     }, Infinity);
 
+    const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
     const allTeamsExhausted = state.teams.length > 0 && state.teams.every(t => {
-        const isFull = (t.playersAcquired?.length || 0) >= 25;
+        const isFull = (t.playersAcquired?.length || 0) >= maxSquad;
         const cantAfford = t.currentPurse < 30; // Min bidding threshold requested by user
         return isFull || cantAfford;
     });
@@ -2146,14 +2981,29 @@ function loadNextPlayer(roomCode, io) {
     // --- LEGEND PAUSE LOGIC ---
     const playerName = player.player || player.name || "";
     // [MOD] Skip legend intro in AI mode
-    const isLegend = LEGEND_NAMES.includes(playerName) && state.currentIndex > 0 && !state.isAiMode;
+    const isLegend = isLegendPlayer(playerName, state.league) && state.currentIndex > 0 && !state.isAiMode;
+
+    let rtmEligibleTeamName = null;
+    let rtmEligibleTeamId = null;
+    if (state.league === 'wpl' || state.league === 'sa20') {
+        const prevTeam = findPreviousTeamForPlayer(state, playerName);
+        if (prevTeam) {
+            const rtmLeft = (prevTeam.rtmCards || 0) - (prevTeam.rtmUsedCount || 0);
+            if (rtmLeft > 0) {
+                rtmEligibleTeamName = prevTeam.teamName;
+                rtmEligibleTeamId = prevTeam.franchiseId;
+            }
+        }
+    }
 
     state.currentPlayer = {
         ...player, // Retain ALL fields (stats, image_path, role, etc.) for UI sync
         id: String(player._id || player.id),
         name: playerName,
         basePrice: player.basePrice || player.base_price,
-        poolID: player.poolID || player.originalPool
+        poolID: player.poolID || player.originalPool,
+        rtmEligibleTeamName,
+        rtmEligibleTeamId
     };
     state.lastBidTime = new Date();
     
@@ -2230,7 +3080,7 @@ function loadNextPlayer(roomCode, io) {
  * getBotValuation - Estimates how much a bot is willing to pay for a player.
  * Now dynamic based on player pool, bot "personality", and squad urgency.
  */
-function getBotValuation(player, bot, currentSquadSize = 0) {
+function getBotValuation(player, bot, currentSquadSize = 0, league = 'ipl') {
     if (!player) return 0;
     const basePrice = player.basePrice || 100;
     const pool = (player.poolID || "").toLowerCase();
@@ -2266,9 +3116,21 @@ function getBotValuation(player, bot, currentSquadSize = 0) {
         maxCap = 400;
     }
 
+    // Uncapped rules for SA20: if SA20, player is uncapped, and bot has < 2 uncapped, boost valuation
+    if (league === 'sa20' && isSa20UncappedAcquired(player)) {
+        const uncappedCount = (bot.playersAcquired || []).filter(p => isSa20UncappedAcquired(p)).length;
+        if (uncappedCount < 2) {
+            const boost = uncappedCount === 0 ? 1.8 : 1.4;
+            minMult *= boost;
+            maxMult *= boost;
+            maxCap *= boost;
+        }
+    }
+
     // --- BUDGET AWARENESS ---
     const currentPurse = bot.currentPurse || 0;
-    const totalBudget = 12000;
+    const startPurse = bot.startingPurse || 12000;
+    const totalBudget = startPurse;
     const purseRatio = currentPurse / totalBudget;
     
     // Exponential damping as budget runs low
@@ -2287,41 +3149,42 @@ function getBotValuation(player, bot, currentSquadSize = 0) {
     const isExtreme = Math.random() < starChance;
     if (isExtreme) {
         maxMult += (2.0 * budgetFactor);
-        maxCap += (300 * budgetFactor);
+        maxCap += ((startPurse * 0.025) * budgetFactor); // Proportional star boost (e.g. 300L for 12000L, 8.5L for 340L)
     }
 
-    // [RULE] Urgency Factor: If below 18 players, bots become more desperate
-    if (currentSquadSize < 18) {
-        const urgencyBoost = (18 - currentSquadSize) * 0.25; // Adjusted
+    // [RULE] Urgency Factor: If below targetMin players, bots become more desperate
+    const targetMin = startPurse <= 500 ? 17 : (startPurse <= 2000 ? 15 : 18);
+    const minReservePerPlayer = getMinReservePerPlayer(startPurse);
+
+    if (currentSquadSize < targetMin) {
+        const urgencyBoost = (targetMin - currentSquadSize) * 0.25; // Adjusted
         minMult += urgencyBoost;
         maxMult += urgencyBoost;
         // Do NOT add to maxCap here, keep caps absolute per pool
     }
 
-    // [RULE] 80/20 Budget Strategy (120cr Total)
-    // 80% (96cr) for first 10 players. 20% (24cr) for remaining 8.
-    const startPurse = 12000;
-    
+    // [RULE] 80/20 Budget Strategy
+    // 80% of purse for first 10 players. 20% for remaining.
     if (currentSquadSize < 10) {
         // Strict cap per player in early phase to prevent single-player blowout
-        const spendingCap = 2100; // Hard limit 21cr for Top 10 phase
+        const spendingCap = startPurse * 0.175; // 17.5% of starting purse (e.g. 2100L for IPL, 59.5L for SA20)
         if (maxCap > spendingCap) maxCap = spendingCap;
         
         // Dynamic Ceiling based on current avg slot value
         const slotsNeeded = Math.max(1, 10 - currentSquadSize);
-        const targetRemainingForTop10 = 9600 - (12000 - currentPurse); 
+        const targetRemainingForTop10 = (startPurse * 0.8) - (startPurse - currentPurse); 
         const avgRemainingInPhase = Math.max(0, targetRemainingForTop10 / slotsNeeded);
         
-        // [FIX] Source of 17.28Cr (9.6 * 1.8). Adding personality-based jitter to differentiate bots.
+        // Adding personality-based jitter to differentiate bots.
         const personalityNoise = 0.9 + (personalityFactor * 0.2); // 0.9x to 1.1x
         const dynamicCeiling = Math.max(basePrice * 1.5, (avgRemainingInPhase * 1.8 * personalityNoise));
         if (maxCap > dynamicCeiling) maxCap = dynamicCeiling;
     } else {
-        // Calculative phase: Strictly reserve for 18 players
-        const neededFor18 = Math.max(1, 18 - currentSquadSize);
-        // Reserve 45L per player for remaining 18.
-        const reserveMargin = neededFor18 * 45; 
-        const safeMax = (currentPurse - reserveMargin) / neededFor18;
+        // Calculative phase: Strictly reserve for targetMin players
+        const neededForMin = Math.max(1, targetMin - currentSquadSize);
+        // Reserve minReservePerPlayer per player + slightly more buffer
+        const reserveMargin = neededForMin * minReservePerPlayer * 1.2; 
+        const safeMax = (currentPurse - reserveMargin) / neededForMin;
         
         const phaseCap = Math.max(basePrice * 1.2, safeMax);
         if (maxCap > phaseCap) maxCap = phaseCap;
@@ -2332,8 +3195,19 @@ function getBotValuation(player, bot, currentSquadSize = 0) {
 
     const multiplier = finalMin + (Math.random() * (finalMax - finalMin));
     
-    // [FIX] Helper to ensure all bids are in 0.25Cr (25L) increments
-    const roundToStandard = (val) => Math.max(25, Math.floor(val / 25) * 25);
+    // Helper to ensure all bids are in standard increments based on league starting purse
+    const roundToStandard = (val) => {
+        if (league === 'sa20') {
+            // SA20: Round to nearest 0.25 (R25k)
+            return Math.max(1.0, Math.floor(val / 0.25) * 0.25);
+        } else if (league === 'wpl') {
+            // WPL: Round to nearest 5L
+            return Math.max(10, Math.floor(val / 5) * 5);
+        } else {
+            // IPL: Round to nearest 25L
+            return Math.max(25, Math.floor(val / 25) * 25);
+        }
+    };
 
     let valuation = roundToStandard(basePrice * multiplier);
     
@@ -2369,10 +3243,11 @@ async function fillRoomWithBots(roomCode, io) {
     }
 
     // Fill all available slots
+    const PlayerCache = state.league === 'sa20' ? require('../utils/PlayerCache') : null;
     const botsToAdd = [];
     AI_BOTS.slice(0, pool.length).forEach((botDef, index) => {
         const teamDef = pool.pop();
-        botsToAdd.push({
+        const botTeam = {
             franchiseId: teamDef._id,
             teamName: teamDef.name,
             teamThemeColor: teamDef.primaryColor,
@@ -2382,10 +3257,14 @@ async function fillRoomWithBots(roomCode, io) {
             ownerName: botDef.name,
             isBot: true,
             currentPurse: teamDef.purseLimit || 12000,
+            startingPurse: teamDef.purseLimit || 12000,
             overseasCount: 0,
             rtmUsed: false,
+            rtmCards: getTeamRtmCards(state, teamDef.name),
+            rtmUsedCount: 0,
             playersAcquired: []
-        });
+        };
+        botsToAdd.push(botTeam);
     });
 
     state.teams.push(...botsToAdd);
@@ -2393,7 +3272,7 @@ async function fillRoomWithBots(roomCode, io) {
 
     // Sync to DB and broadcast
     markDirty(roomCode, { franchisesInRoom: state.teams });
-    io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams) });
+    io.to(roomCode).emit('lobby_update', { teams: lightweightTeams(state.teams, state.league) });
     io.to(roomCode).emit('available_teams', { teams: [] });
 
     console.log(`[AI-MODE] Successfully added ${botsToAdd.length} bots to room ${roomCode}`);
@@ -2411,14 +3290,15 @@ function handleBotBidding(roomCode, io) {
         const squadSize = t.playersAcquired?.length || 0;
         const overseasCount = t.overseasCount || 0;
         
-        const startPrice = Math.max(25, Math.floor((currentPlayer.basePrice || 0) / 25) * 25);
-        const minInc = getMinIncrement(currentPlayer.poolID, state.currentBid.amount);
-        const nextBid = state.currentBid.amount === 0 ? startPrice : state.currentBid.amount + minInc;
+        const startPrice = (state.league === 'wpl' || state.league === 'sa20') ? (currentPlayer.basePrice || 10) : Math.max(25, Math.floor((currentPlayer.basePrice || 0) / 25) * 25);
+        const nextBid = getRequiredBid(state.currentBid.amount || 0, startPrice, currentPlayer.poolID, state.league);
 
+        const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
+        const maxOverseas = state.league === 'wpl' ? 6 : (state.league === 'sa20' ? 7 : 8);
         return t.isBot && 
                t.currentPurse >= nextBid && 
-               squadSize < 25 && 
-               !(currentPlayer.isOverseas && overseasCount >= 8) && 
+               squadSize < maxSquad && 
+               !(currentPlayer.isOverseas && overseasCount >= maxOverseas) && 
                state.currentBid.teamId !== t.franchiseId &&
                isBotSustainable(t, nextBid) &&
                !isBotOverBudget(t, nextBid); // [STRICT] 80/20 Rule
@@ -2447,10 +3327,9 @@ function handleBotBidding(roomCode, io) {
         const bidChance = isAggressivePhase ? 0.9 : 0.20;
         if (Math.random() > bidChance) continue; 
  
-        const valuation = getBotValuation(currentPlayer, bot, bot.playersAcquired?.length || 0);
-        const startPrice = Math.max(25, Math.floor((currentPlayer.basePrice || 0) / 25) * 25);
-        const minInc = getMinIncrement(currentPlayer.poolID, currentAmt);
-        const nextBidAmount = currentAmt === 0 ? startPrice : currentAmt + minInc;
+        const valuation = getBotValuation(currentPlayer, bot, bot.playersAcquired?.length || 0, state.league);
+        const startPrice = (state.league === 'wpl' || state.league === 'sa20') ? (currentPlayer.basePrice || 10) : Math.max(25, Math.floor((currentPlayer.basePrice || 0) / 25) * 25);
+        const nextBidAmount = getRequiredBid(currentAmt, startPrice, currentPlayer.poolID, state.league);
 
         if (nextBidAmount <= valuation && nextBidAmount <= bot.currentPurse) {
             // ATOMIC UPDATE for Bots
@@ -2547,7 +3426,7 @@ function tickAuctionTimer(roomCode, io) {
         ActiveRoom.updateOne({ roomCode }, { $set: { isTimerRunning: false } }).exec();
 
         // Finalize player
-        processHammerDown(roomCode, io);
+        checkAndTriggerRTM(roomCode, io);
     }
 }
 
@@ -2569,14 +3448,15 @@ async function autoResolveCurrentPlayer(roomCode, io, nextPlayerDelay = 3000) {
     let interestedBots = state.teams
         .filter(t => t.isBot && t.franchiseId !== state.currentBid.teamId)
         .map(bot => {
-            const valuation = getBotValuation(currentPlayer, bot, bot.playersAcquired?.length || 0);
+            const valuation = getBotValuation(currentPlayer, bot, bot.playersAcquired?.length || 0, state.league);
             const squadSize = bot.playersAcquired?.length || 0;
             const overseasCount = bot.overseasCount || 0;
 
-            const minNextBid = currentBidAmount === 0 ? currentPlayer.basePrice : currentBidAmount + 25;
+            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
+            const maxOverseas = state.league === 'wpl' ? 6 : (state.league === 'sa20' ? 7 : 8);
             const canAfford = bot.currentPurse >= minNextBid;
-            const notFull = squadSize < 25;
-            const osLimitNotReached = !(currentPlayer.isOverseas && overseasCount >= 8);
+            const notFull = squadSize < maxSquad;
+            const osLimitNotReached = !(currentPlayer.isOverseas && overseasCount >= maxOverseas);
             const wantsToPayMore = valuation >= minNextBid;
             const sustainable = isBotSustainable(bot, minNextBid);
             const notOverBudget = !isBotOverBudget(bot, minNextBid);
@@ -2597,9 +3477,15 @@ async function autoResolveCurrentPlayer(roomCode, io, nextPlayerDelay = 3000) {
 
         // Winning price is max(basePrice, currentAmt, runnerUp valuation + 25)
         // [FIX] Ensure finalPrice is rounded to 25L increments
-        let finalPrice = Math.max(currentPlayer.basePrice, currentBidAmount, (Math.floor(runnerUpVal / 25) * 25) + 25);
+        let step = 25;
+        if (state.league === 'wpl') {
+            step = 5;
+        } else if (state.league === 'sa20') {
+            step = 0.25;
+        }
+        let finalPrice = Math.max(currentPlayer.basePrice, currentBidAmount, (Math.floor(runnerUpVal / step) * step) + step);
         if (finalPrice > winner.valuation) finalPrice = winner.valuation;
-        if (finalPrice > winner.bot.currentPurse) finalPrice = (Math.floor(winner.bot.currentPurse / 25) * 25);
+        if (finalPrice > winner.bot.currentPurse) finalPrice = (Math.floor(winner.bot.currentPurse / step) * step);
 
         state.currentBid = {
             amount: finalPrice,
@@ -2628,7 +3514,173 @@ async function autoResolveCurrentPlayer(roomCode, io, nextPlayerDelay = 3000) {
     }
 
     // Process sale
+    await checkAndTriggerRTM(roomCode, io, nextPlayerDelay);
+}
+
+function findPreviousTeamForPlayer(state, playerName) {
+    if (!state.retentionSquads) return null;
+    const canonicalSearchName = canonicalizePlayerName(playerName);
+    for (const team of state.teams) {
+        const squad = findTeamRetentionSquad(state, team.teamName);
+        if (!squad) continue;
+        const found = squad.some(p => canonicalizePlayerName(p.name || p) === canonicalSearchName);
+        if (found) return team;
+    }
+    return null;
+}
+
+function tickRtmTimer(roomCode, io) {
+    const state = roomStates[roomCode];
+    if (!state || state.status !== 'RTM' || !state.rtmState) {
+        if (roomTimers[roomCode]) {
+            clearInterval(roomTimers[roomCode]);
+            delete roomTimers[roomCode];
+        }
+        return;
+    }
+
+    const remaining = Math.max(0, Math.ceil((state.rtmState.timerEndsAt - Date.now()) / 1000));
+    state.rtmState.timer = remaining;
+
+    // Broadcast full state
+    emitFullAuctionState(roomCode, io);
+
+    if (remaining <= 0) {
+        console.log(`[RTM] Timer expired for ${state.rtmState.prevTeamName}. Automatically passing.`);
+        handleRtmDecision(roomCode, io, false);
+    }
+}
+
+async function handleRtmDecision(roomCode, io, useRtm) {
+    const state = roomStates[roomCode];
+    if (!state || state.status !== 'RTM' || !state.rtmState) return;
+
+    // Clear RTM timer
+    if (roomTimers[roomCode]) {
+        clearInterval(roomTimers[roomCode]);
+        delete roomTimers[roomCode];
+    }
+
+    const { prevTeamId, prevTeamName, playerName, bidAmount, nextPlayerDelay } = state.rtmState;
+
+    if (useRtm) {
+        // Find previous team
+        const prevTeam = state.teams.find(t => t.franchiseId === prevTeamId);
+        if (prevTeam) {
+            // RTM match!
+            state.currentBid = {
+                amount: bidAmount,
+                teamId: prevTeam.franchiseId,
+                teamName: prevTeam.teamName,
+                teamColor: prevTeam.teamThemeColor,
+                teamLogo: prevTeam.teamLogo,
+                ownerName: prevTeam.ownerName,
+                ownerUserId: prevTeam.ownerUserId,
+                isRtm: true
+            };
+            
+            // Increment rtmUsedCount
+            prevTeam.rtmUsedCount = (prevTeam.rtmUsedCount || 0) + 1;
+            prevTeam.rtmUsed = true;
+
+            console.log(`[RTM] ${prevTeamName} matched bid of ${bidAmount}L for ${playerName}!`);
+            // Emit RTM usage visually if needed, but DO NOT emit a raw chat message 
+            // since the subsequent 'player_sold' event will log the RTM acquisition cleanly.
+        }
+    } else {
+        console.log(`[RTM] ${prevTeamName} passed on matching bid of ${bidAmount}L for ${playerName}.`);
+    }
+
+    // Clean up rtmState
+    state.rtmState = null;
+    state.status = 'ONGOING';
+
+    // Update ActiveRoom in mongo to clear RTM status and state
+    await ActiveRoom.updateOne({ roomCode }, {
+        $set: {
+            rtmState: null,
+            teams: state.teams
+        }
+    }).exec().catch(err => console.warn(`[RTM] ActiveRoom clean failed:`, err.message));
+
+    // Proceed to standard hammer down
     await processHammerDown(roomCode, io, nextPlayerDelay);
+}
+
+function checkAndTriggerRTM(roomCode, io, nextPlayerDelay = 3000) {
+    const state = roomStates[roomCode];
+    if (!state) return;
+
+    const player = state.currentPlayer;
+    const playerName = player ? (player.player || player.name || 'Unknown Player') : 'Unknown Player';
+
+    if (state.currentBid.amount > 0 && (state.league === 'wpl' || state.league === 'sa20')) {
+        const prevTeam = findPreviousTeamForPlayer(state, playerName);
+        if (prevTeam) {
+            const rtmLeft = (prevTeam.rtmCards || 0) - (prevTeam.rtmUsedCount || 0);
+            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
+            const maxOverseas = state.league === 'wpl' ? 6 : (state.league === 'sa20' ? 7 : 8);
+            const prevTeamOverseasCount = (prevTeam.playersAcquired || []).filter(p => p.isOverseas || p.overseas).length;
+            const isOverseasLimitReached = player && (player.isOverseas || player.overseas) && prevTeamOverseasCount >= maxOverseas;
+            const isSquadFull = (prevTeam.playersAcquired?.length || 0) >= maxSquad;
+            const canAfford = prevTeam.currentPurse >= state.currentBid.amount;
+            const hasRtmCards = rtmLeft > 0;
+            const isNotHighestBidder = state.currentBid.teamId !== prevTeam.franchiseId;
+
+            if (isNotHighestBidder && hasRtmCards && canAfford && !isSquadFull && !isOverseasLimitReached) {
+                console.log(`[RTM] Intercepting hammer down. Triggering RTM for ${playerName} (owned by ${prevTeam.teamName} last season)`);
+                
+                if (roomTimers[roomCode]) {
+                    clearInterval(roomTimers[roomCode]);
+                    delete roomTimers[roomCode];
+                }
+
+                state.status = 'RTM';
+                state.rtmState = {
+                    prevTeamId: prevTeam.franchiseId,
+                    prevTeamName: prevTeam.teamName,
+                    prevTeamOwnerUserId: prevTeam.ownerUserId,
+                    playerName: playerName,
+                    bidAmount: state.currentBid.amount,
+                    timer: 15,
+                    timerEndsAt: Date.now() + 15000,
+                    nextPlayerDelay
+                };
+
+                ActiveRoom.updateOne({ roomCode }, {
+                    $set: {
+                        auctionStatus: 'RTM',
+                        rtmState: state.rtmState,
+                        isTimerRunning: false
+                    }
+                }).exec().catch(err => console.warn(`[RTM] ActiveRoom update failed:`, err.message));
+
+                emitFullAuctionState(roomCode, io);
+
+                roomTimers[roomCode] = setInterval(() => {
+                    tickRtmTimer(roomCode, io);
+                }, 1000);
+
+                if (prevTeam.isBot) {
+                    setTimeout(() => {
+                        const currState = roomStates[roomCode];
+                        if (currState && currState.status === 'RTM' && currState.rtmState?.playerName === playerName) {
+                            const valuation = getBotValuation(player, prevTeam, prevTeam.playersAcquired?.length || 0, currState.league);
+                            const useRtm = valuation >= currState.currentBid.amount;
+                            console.log(`[RTM-BOT] Bot ${prevTeam.teamName} decided to ${useRtm ? 'USE' : 'PASS'} RTM for ${playerName}`);
+                            handleRtmDecision(roomCode, io, useRtm);
+                        }
+                    }, 2000);
+                }
+                return; // Intercepted
+            } else {
+                console.log(`[RTM-SKIP] RTM not triggered for ${playerName}: isNotHighestBidder=${isNotHighestBidder}, rtmLeft=${rtmLeft}, canAfford=${canAfford}, isSquadFull=${isSquadFull}, isOverseasLimitReached=${isOverseasLimitReached}`);
+            }
+        }
+    }
+
+    // Default: hammer down
+    processHammerDown(roomCode, io, nextPlayerDelay);
 }
 
 async function processHammerDown(roomCode, io, nextPlayerDelay = 3000) {
@@ -2666,7 +3718,12 @@ async function processHammerDown(roomCode, io, nextPlayerDelay = 3000) {
                 basePrice: player.basePrice,
                 photoUrl: player.photoUrl,
                 imagepath: player.imagepath,
-                image_path: player.image_path
+                image_path: player.image_path,
+                age: player.age,
+                isU23: player.isU23,
+                poolID: player.poolID,
+                poolName: player.poolName,
+                timestamp: new Date().toISOString()
             });
             winningSocketId = state.teams[winningTeamIndex].ownerSocketId;
         }
@@ -2703,7 +3760,7 @@ async function processHammerDown(roomCode, io, nextPlayerDelay = 3000) {
                 poolName: player.poolName
             },
             winningBid: state.currentBid,
-            teams: lightweightTeams(state.teams)
+            teams: lightweightTeams(state.teams, state.league)
         });
 
         // Persist Transaction Record
@@ -2739,9 +3796,10 @@ async function processHammerDown(roomCode, io, nextPlayerDelay = 3000) {
             // CHECK: Auto-stop if every team has 25 players
             // ensure there is at least one team before treating this as "full" otherwise
             // an empty array would return true and immediately transition to selection
-            const ALL_SQUADS_FULL = state.teams.length > 0 && state.teams.every(t => (t.playersAcquired?.length || 0) >= 25);
+            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
+            const ALL_SQUADS_FULL = state.teams.length > 0 && state.teams.every(t => (t.playersAcquired?.length || 0) >= maxSquad);
             if (ALL_SQUADS_FULL) {
-                console.log(`\n--- ALL SQUADS FULL (25 players each) in Room ${roomCode} ---`);
+                console.log(`\n--- ALL SQUADS FULL (${maxSquad} players each) in Room ${roomCode} ---`);
                 handleAuctionEndTransition(roomCode, io);
                 return; // Stop further processing for this player
             }
@@ -2753,7 +3811,10 @@ async function processHammerDown(roomCode, io, nextPlayerDelay = 3000) {
         state.status = 'Unsold'; // Temporarily pause
         // Player Unsold
         if (!state.unsoldHistory) state.unsoldHistory = [];
-        state.unsoldHistory.push(player);
+        const playerHistoryKey = player._id || player.playerId || player.name || player.player;
+        if (!state.unsoldHistory.some((entry) => (entry._id || entry.playerId || entry.name || entry.player) === playerHistoryKey)) {
+            state.unsoldHistory.push(player);
+        }
         io.to(roomCode).emit('player_unsold', { player, unsoldHistory: state.unsoldHistory });
 
         try {
@@ -2784,25 +3845,35 @@ async function processHammerDown(roomCode, io, nextPlayerDelay = 3000) {
      }
  }
 
+function getMinReservePerPlayer(startPurse) {
+    if (startPurse <= 500) {
+        return 1.75; // SA20 minimum bid
+    } else if (startPurse <= 2000) {
+        return 10; // WPL minimum bid
+    } else {
+        return 35; // IPL minimum bid
+    }
+}
+
 /**
  * isBotOverBudget - Enforces the 80/20 rule: 80% of purse for first 10 players.
  */
 function isBotOverBudget(bot, nextBid) {
-    const startPurse = 12000;
+    const startPurse = bot.startingPurse || 12000;
     const currentPurse = bot.currentPurse || 0;
     const spentPurse = startPurse - (currentPurse - nextBid); // Include this bid
     const squadSize = (bot.playersAcquired?.length || 0);
     
-    // [RULE] Max 80% (9600L) for first 10 players
-    // If they already have 9 players and spent 9000L, and next bid is 700L (Total 9700L), refuse.
-    if (squadSize < 10 && spentPurse > 9600) {
+    // [RULE] Max 80% of purse for first 10 players
+    const maxSpentForFirst10 = startPurse * 0.8;
+    if (squadSize < 10 && spentPurse > maxSpentForFirst10) {
         return true;
     }
     
     // [RULE] Extreme conservation if nearing budget exhaustion
-    // Must keep enough (2400 - 9600 = 2400L) for the remaining 8 players.
     const remainingNeeded = Math.max(0, 18 - squadSize);
-    const reserveNeeded = remainingNeeded * 45; 
+    const minReserve = getMinReservePerPlayer(startPurse);
+    const reserveNeeded = remainingNeeded * minReserve * 1.2; 
     if ((currentPurse - nextBid) < reserveNeeded) {
         return true;
     }
@@ -2815,11 +3886,12 @@ function isBotOverBudget(bot, nextBid) {
  * AND still have enough purse left to reach the minimum of 18 players
  */
 function isBotSustainable(bot, nextBid) {
+    const startPurse = bot.startingPurse || 12000;
     const currentCount = bot.playersAcquired?.length || 0;
-    const targetMin = 18;
+    const targetMin = startPurse <= 500 ? 17 : (startPurse <= 2000 ? 15 : 18);
     const remainingNeeded = Math.max(0, targetMin - (currentCount + 1));
-    // Reserve at least 35L per remaining player (more realistic)
-    const neededReserve = remainingNeeded * 35; 
+    const minReserve = getMinReservePerPlayer(startPurse);
+    const neededReserve = remainingNeeded * minReserve; 
     const canAfford = (bot.currentPurse - nextBid) >= neededReserve;
     
     if (!canAfford && bot.isBot) {

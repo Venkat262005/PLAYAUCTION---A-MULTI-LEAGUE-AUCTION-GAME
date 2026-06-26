@@ -4,160 +4,118 @@ import confetti from 'canvas-confetti';
 import { playCustomSlam } from '../utils/soundEngine';
 import { fmtCr } from '../utils/playerUtils';
 
-const GavelSlam = ({ type, teamName, teamColor, teamLogo, playerName, winningBid, playerImage }) => {
+/**
+ * Sold / unsold stamp — designed to occupy the exact timer column slot.
+ * `slot="timer"` constrains width/height to match the countdown circle.
+ */
+const GavelSlam = ({
+    type,
+    teamName,
+    teamColor,
+    teamLogo,
+    playerName,
+    winningBid,
+    playerImage,
+    currency = 'inr',
+}) => {
+    const isSold = type === 'SOLD';
+    const accent = isSold ? (teamColor || '#D4AF37') : '#8B7355';
+    const displayName = playerName ? playerName.toUpperCase() : 'PLAYER';
+    const priceLabel = isSold ? fmtCr(winningBid?.amount || 0, currency) : null;
+    const teamShort = teamName ? teamName.split(' ').pop()?.toUpperCase() : '';
 
     useEffect(() => {
         playCustomSlam(type, teamName);
 
-        if (type === 'SOLD') {
+        if (isSold) {
             const timer = setTimeout(() => {
-                const colors = [teamColor || '#ffffff', '#FFD700', '#FFEA00', '#FFA500'];
-                
-                // 1. Massive central explosion
                 confetti({
-                    particleCount: 200,
-                    spread: 160,
-                    origin: { y: 0.5 },
-                    colors: colors,
-                    startVelocity: 50,
-                    gravity: 0.8,
-                    shapes: ['circle', 'square']
+                    particleCount: 30,
+                    spread: 55,
+                    origin: { y: 0.5, x: 0.72 },
+                    colors: [accent, '#D4AF37', '#FFE58F'],
+                    startVelocity: 22,
+                    gravity: 1,
+                    ticks: 100,
+                    scalar: 0.7,
                 });
-
-                // 2. Secondary burst of stars
-                setTimeout(() => {
-                    confetti({
-                        particleCount: 100,
-                        spread: 120,
-                        origin: { y: 0.5 },
-                        colors: ['#FFD700', '#ffffff'],
-                        startVelocity: 40,
-                        gravity: 0.5,
-                        shapes: ['star'],
-                        scalar: 1.2
-                    });
-                }, 250);
-
-                // 3. Falling team-colored confetti from top
-                const duration = 2500;
-                const end = Date.now() + duration;
-                (function frame() {
-                    confetti({
-                        particleCount: 4,
-                        angle: 270,
-                        spread: 180,
-                        origin: { x: Math.random(), y: -0.1 },
-                        startVelocity: Math.random() * 20 + 20,
-                        colors: [teamColor || '#ffffff', '#FFD700']
-                    });
-                    if (Date.now() < end) {
-                        requestAnimationFrame(frame);
-                    }
-                }());
-            }, 300);
+            }, 350);
             return () => clearTimeout(timer);
         }
-    }, [type, teamColor, teamName]);
+    }, [type, teamColor, teamName, isSold, accent]);
 
-    // Generate the starburst badge outer path
-    const getStarburstPath = (cx, cy, outerRadius, innerRadius, points) => {
-        let path = '';
-        const angleStep = Math.PI / points;
-        for (let i = 0; i < 2 * points; i++) {
-            const radius = i % 2 === 0 ? outerRadius : innerRadius;
-            const angle = i * angleStep;
-            const x = cx + radius * Math.cos(angle);
-            const y = cy + radius * Math.sin(angle);
-            path += (i === 0 ? 'M ' : 'L ') + `${x},${y} `;
-        }
-        path += 'Z';
-        return path;
-    };
-
-    const isSold = type === 'SOLD';
-    const cx = 140;
-    const cy = 140;
-    const starburstPath = getStarburstPath(cx, cy, 130, 115, 32);
-
-    // Theme colors
-    const badgeColor = isSold ? (teamColor || '#FFEB3B') : '#ef4444'; // Red for UNSOLD
-    const accentColor = isSold ? 'white' : 'white';
-    const textColor = isSold ? 'white' : 'white';
+    const ringClass = 'w-16 h-16 sm:w-28 sm:h-28 md:w-32 md:h-32';
 
     return (
         <motion.div
-            initial={{ scale: 2, opacity: 0, rotate: isSold ? -20 : 10 }}
-            animate={{ scale: 0.5, opacity: 1, rotate: isSold ? -10 : -15 }}
-            exit={{ scale: 0, opacity: 0, y: -50 }}
-            transition={{ type: "spring", stiffness: 200, damping: 12, delay: 0.1 }}
-            className="absolute z-[100] drop-shadow-[0_20px_30px_rgba(0,0,0,0.5)] flex items-center justify-center pointer-events-none"
+            initial={{ scale: 0.6, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.75, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 280, damping: 22 }}
+            className="flex flex-col items-center justify-start pointer-events-none w-16 sm:w-28 md:w-32"
         >
-            <svg width="200" height="200" viewBox="0 0 280 280" className="overflow-visible">
-                <defs>
-                    <path id="curveTop" d={`M ${cx - 75},${cy} A 75,75 0 0,1 ${cx + 75},${cy}`} fill="transparent" />
-                    <path id="curveBottom" d={`M ${cx - 85},${cy} A 85,85 0 0,0 ${cx + 85},${cy}`} fill="transparent" />
-                    <filter id="shadowGlow" x="-20%" y="-20%" width="140%" height="140%">
-                        <feDropShadow dx="0" dy="4" stdDeviation="6" floodOpacity="0.4" floodColor="#000" />
-                    </filter>
-                    <clipPath id="avatarClip">
-                        <circle cx={cx} cy={cy} r="45" />
-                    </clipPath>
-                </defs>
-
-                {/* Starburst Base */}
-                <path d={starburstPath} fill={badgeColor} stroke="rgba(255,255,255,0.4)" strokeWidth="3" filter="url(#shadowGlow)" />
-
-                {/* Inner Accent Ring */}
-                <circle cx={cx} cy={cy} r="105" fill={badgeColor} stroke="rgba(0,0,0,0.2)" strokeWidth="3" />
-
-                {/* Inner Content Area */}
-                <circle cx={cx} cy={cy} r="95" fill={badgeColor} stroke={accentColor} strokeWidth="2" strokeDasharray="6 4" />
-                <circle cx={cx} cy={cy} r="50" fill="white" stroke="rgba(0,0,0,0.1)" strokeWidth="2" />
-
-                {/* Top Text: Player Name */}
-                <text fontSize={playerName && playerName.length > 12 ? "18" : "22"} fontWeight="900" fill={textColor} letterSpacing="1" style={{ fontFamily: 'Outfit, Arial, sans-serif', textShadow: '2px 2px 4px rgba(0,0,0,0.9)', stroke: 'rgba(0,0,0,0.5)', strokeWidth: '0.5px' }}>
-                    <textPath href="#curveTop" startOffset="50%" textAnchor="middle">
-                        {playerName ? playerName.toUpperCase() : "PLAYER"}
-                    </textPath>
-                </text>
-
-                {/* Bottom Text: Status */}
-                <text fontSize={isSold && teamName && teamName.length > 15 ? "11" : "13"} fontWeight="900" fill={textColor} letterSpacing="0.5" style={{ fontFamily: 'Outfit, Arial, sans-serif', textShadow: '2px 2px 4px rgba(0,0,0,0.9)', stroke: 'rgba(0,0,0,0.5)', strokeWidth: '0.5px' }}>
-                    <textPath href="#curveBottom" startOffset="50%" textAnchor="middle">
-                        {isSold
-                            ? `SOLD TO ${teamName ? teamName.toUpperCase().substring(0, 20) : "FRANCHISE"} • ${fmtCr(winningBid?.amount || 0)}`
-                            : "NO BIDS RECEIVED • TRY AGAIN LATER"
-                        }
-                    </textPath>
-                </text>
-
-                {/* Center Content: Team Logo or Player Image for UNSOLD */}
-                {isSold ? (
-                    teamLogo ? (
-                        <image href={teamLogo} x={cx - 40} y={cy - 40} width="80" height="80" preserveAspectRatio="xMidYMid meet" />
-                    ) : (
-                        <text x={cx} y={cy + 12} fontSize="36" fontWeight="900" textAnchor="middle" fill="#004BA0">
-                            {teamName?.charAt(0)}
-                        </text>
-                    )
-                ) : (
-                    playerImage ? (
-                        <image
-                            href={playerImage}
-                            x={cx - 45}
-                            y={cy - 45}
-                            width="90"
-                            height="90"
-                            preserveAspectRatio="xMidYMid slice"
-                            clipPath="url(#avatarClip)"
+            {/* Circle — same footprint as the timer ring */}
+            <motion.div
+                initial={{ scale: 0.85, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ delay: 0.05, duration: 0.4 }}
+                className={`relative ${ringClass} rounded-full flex items-center justify-center shrink-0`}
+                style={{
+                    background: `radial-gradient(circle at 30% 25%, rgba(255,255,255,0.1), transparent 55%), linear-gradient(145deg, ${accent}28, #120a02 70%)`,
+                    boxShadow: `0 0 0 1px ${accent}55, 0 0 24px ${accent}28, inset 0 0 20px rgba(0,0,0,0.45)`,
+                }}
+            >
+                <div
+                    className="w-[78%] h-[78%] rounded-full flex items-center justify-center overflow-hidden"
+                    style={{
+                        background: isSold
+                            ? `linear-gradient(160deg, ${accent}35, #1a1205 65%)`
+                            : 'linear-gradient(160deg, #2a1f14, #120a02)',
+                    }}
+                >
+                    {isSold && teamLogo ? (
+                        <img src={teamLogo} alt="" className="w-[58%] h-[58%] object-contain drop-shadow-md" />
+                    ) : playerImage ? (
+                        <img
+                            src={playerImage}
+                            alt=""
+                            className="w-full h-full object-cover object-top opacity-45 grayscale"
                         />
                     ) : (
-                        <text x={cx} y={cy + 12} fontSize="20" fontWeight="900" textAnchor="middle" fill="#ef4444" style={{ fontFamily: 'Outfit, Arial, sans-serif' }}>
-                            UNSOLD
-                        </text>
-                    )
+                        <span className="text-[8px] font-black text-[#D4AF37]/50 uppercase">
+                            {isSold ? teamShort.charAt(0) || '?' : '—'}
+                        </span>
+                    )}
+                </div>
+            </motion.div>
+
+            {/* Labels — stacked below circle, within timer column width */}
+            <motion.div
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.12, duration: 0.35 }}
+                className="mt-1 sm:mt-1.5 flex flex-col items-center text-center w-full px-0.5"
+            >
+                <span
+                    className="text-[7px] sm:text-[9px] font-black tracking-[0.2em] uppercase leading-none"
+                    style={{ color: isSold ? '#D4AF37' : '#8B7355' }}
+                >
+                    {isSold ? 'Sold' : 'Unsold'}
+                </span>
+                <span className="text-[6px] sm:text-[8px] font-bold text-white/75 uppercase tracking-wide w-full truncate leading-tight mt-0.5">
+                    {displayName}
+                </span>
+                {isSold && priceLabel && (
+                    <span className="text-[8px] sm:text-[11px] font-mono font-black text-[#FFE58F] leading-none mt-0.5">
+                        {priceLabel}
+                    </span>
                 )}
-            </svg>
+                {!isSold && (
+                    <span className="text-[6px] sm:text-[7px] text-[#D4AF37]/35 uppercase tracking-wider italic mt-0.5">
+                        no bids
+                    </span>
+                )}
+            </motion.div>
         </motion.div>
     );
 };

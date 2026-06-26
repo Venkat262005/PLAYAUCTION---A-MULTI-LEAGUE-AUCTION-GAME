@@ -3,6 +3,8 @@
  * Strict server-side validation. Never trust the client.
  */
 
+const { getRequiredBid, snapBidForLeague } = require('./bidRules');
+
 const validateBid = (state, team, amount) => {
     if (!state || state.status !== 'Auctioning') {
         return { valid: false, error: 'Auction is not active' };
@@ -19,39 +21,36 @@ const validateBid = (state, team, amount) => {
 
     // 2. Increment Logic (Re-calculated on server)
     const currentPlayer = state.players[state.currentIndex];
-    const poolID = (currentPlayer.poolID || '').toLowerCase();
     const curAmt = state.currentBid.amount;
-
-    let minIncrement = 25; // Default
-    if (poolID.includes('emerging') || poolID.includes('pool3') || poolID.includes('pool4')) {
-        minIncrement = curAmt < 200 ? 5 : 25;
-    }
-
-    const requiredBid = curAmt === 0 ? currentPlayer.basePrice : curAmt + minIncrement;
+    const basePrice = currentPlayer.basePrice || 20;
+    const requiredBid = getRequiredBid(curAmt, basePrice, currentPlayer.poolID || '', state.league);
+    const bidAmount = snapBidForLeague(amount, state.league);
 
     // 3. Amount Integrity
-    if (amount < requiredBid) {
+    if (bidAmount < requiredBid) {
         return { valid: false, error: `Minimum bid is ${requiredBid}L` };
     }
 
     // 4. Financial Guard
-    if (amount > team.currentPurse) {
+    if (bidAmount > team.currentPurse) {
         return { valid: false, error: 'Insufficient purse limit' };
     }
 
     // 4a. Trolling/Overflow Guard
-    if (amount > 5000) { // No single player is worth 50cr in this economy
+    if (bidAmount > 5000) { // No single player is worth 50cr in this economy
         return { valid: false, error: 'Bid amount exceeds realistic limit' };
     }
 
     // 5. Squad Limit Guard
-    if (team.playersAcquired.length >= 25) {
-        return { valid: false, error: 'Squad limit reached (max 25)' };
+    const maxSquad = state && state.league === 'wpl' ? 18 : (state && state.league === 'sa20' ? 19 : 25);
+    if (team.playersAcquired.length >= maxSquad) {
+        return { valid: false, error: `Squad limit reached (max ${maxSquad})` };
     }
 
     // 6. Overseas Guard
-    if (currentPlayer.isOverseas && (team.overseasCount || 0) >= 8) {
-        return { valid: false, error: 'Overseas player limit (8) reached' };
+    const maxOverseas = state && state.league === 'wpl' ? 6 : (state && state.league === 'sa20' ? 7 : 8);
+    if (currentPlayer.isOverseas && (team.overseasCount || 0) >= maxOverseas) {
+        return { valid: false, error: `Overseas player limit (${maxOverseas}) reached` };
     }
 
     return { valid: true };

@@ -9,6 +9,9 @@ const auctionRoomSchema = new mongoose.Schema({
     status: { type: String, enum: ["Lobby", "Auctioning", "Selection", "Finished"], default: "Lobby" },
     purseLimit: { type: Number, default: 12000 },
     isAiMode: { type: Boolean, default: false },
+    league: { type: String, default: 'ipl' }, // [NEW] Track active league
+    currency: { type: String, default: 'inr' },
+    auctionYear: { type: String },
 
     // Embedded array of franchises inside this specific room
     franchisesInRoom: [{
@@ -20,9 +23,12 @@ const auctionRoomSchema = new mongoose.Schema({
         ownerUserId: { type: String }, // Permanent secure identifier
         isBot: { type: Boolean, default: false }, // [NEW] Flag for AI bots
         logoUrl: { type: String },
+        teamLogo: { type: String },
         currentPurse: { type: Number, default: 12000 },
         overseasCount: { type: Number, default: 0 },
         rtmUsed: { type: Boolean, default: false },
+        rtmCards: { type: Number, default: 0 },
+        rtmUsedCount: { type: Number, default: 0 },
         playersAcquired: [{
             player: { type: mongoose.Schema.Types.ObjectId, ref: 'Player' },
             name: { type: String },
@@ -44,6 +50,7 @@ const auctionRoomSchema = new mongoose.Schema({
 
     // Core bidding state
     currentBidAmount: { type: Number, default: 0 },
+    quizLeaderboard: [{ type: mongoose.Schema.Types.Mixed }],
     highestBidderSocketId: { type: String, default: null },
     highestBidderTeamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Franchise', default: null },
 

@@ -4,6 +4,7 @@ class AIQueue {
         this.processing = {};
         this.batchWindow = 150;
         this.cooldown = {
+            gemini: 0,
             huggingface: 0
         };
     }
@@ -39,7 +40,7 @@ class AIQueue {
             console.log(`[AIQueue] Processing ${type} batch | size: ${batch.length}`);
 
             const batchData = batch.flatMap(b => b.data);
-            const order = ["huggingface"];
+            const order = ["gemini", "huggingface"];
 
             let result = null;
             let success = false;

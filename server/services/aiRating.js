@@ -1,4 +1,4 @@
-const AIQueue = require("./AIQueue");
+const { evaluateTeamWithGemini } = require("./geminiTeamEvaluation");
 
 const HF_KEY = process.env.HUGGINGFACE_API_KEY;
 const HF_MODEL = process.env.HUGGINGFACE_MODEL || "openai/gpt-oss-20b";
@@ -278,7 +278,7 @@ function evaluationFallback(team, errorMsg = "") {
 // ───────── MAIN SERVICE ─────────
 async function evaluateAllTeams(teams) {
     if (!teams || teams.length === 0) return [];
-    console.log(`[AI-BATCH] Unified analysis for ${teams.length} teams...`);
+    console.log(`[AI-TEAM] Evaluating ${teams.length} teams individually...`);
 
     // Enrich with pitch and budget context
     const enrichedInput = teams.map(t => ({
@@ -291,68 +291,76 @@ async function evaluateAllTeams(teams) {
     }));
 
     try {
-        const batchSize = 5;
-        let allResults = [];
-        let anyError = null;
-        const evaluationId = Date.now() + "_" + Math.floor(Math.random() * 1000);
+        const results = [];
 
-        for (let i = 0; i < enrichedInput.length; i += batchSize) {
-            const chunk = enrichedInput.slice(i, i + batchSize);
-            console.log(`[AI-CHUNK] Processing chunk of ${chunk.length} teams to respect context token limits.`);
-            
-            const res = await AIQueue.enqueue({
-                type: `unified_analyze_${evaluationId}_chunk_${i}`,
-                data: chunk,
-                providers: {
-                    huggingface: (data) => huggingfaceAdapterBatch(data)
+        for (const team of enrichedInput) {
+            const teamId = team.id || team.teamName;
+            const teamName = team.teamName || team.name;
+            console.log(`[AI-SINGLE] Evaluating ${teamName} as one request...`);
+
+            try {
+                const evalResult = await evaluateTeamWithGemini(team);
+                const fallbackSelection = selectionFallback(team);
+                const defaultXI = fallbackSelection.bestXI;
+                const safeSelect = (s) => (s && Array.isArray(s.playing11)) ? s : defaultXI;
+                const fallbackEval = evaluationFallback(team, "Missing AI properties merged with math fallback");
+
+                results.push({
+                    ...evalResult,
+                    teamName,
+                    bestXI: safeSelect(evalResult.bestXI),
+                    homeXI: safeSelect(evalResult.homeXI),
+                    awayXI: safeSelect(evalResult.awayXI),
+                    evaluation: {
+                        ...fallbackEval,
+                        ...(evalResult.evaluation || {})
+                    }
+                });
+                continue;
+            } catch (geminiErr) {
+                console.log(`[AI-SINGLE] Gemini failed for ${teamName}: ${geminiErr.message}`);
+            }
+
+            try {
+                const hfRes = await huggingfaceAdapterBatch([team]);
+                const evalResult = hfRes?.results?.[0];
+                if (evalResult && !evalResult.fallback) {
+                    const fallbackSelection = selectionFallback(team);
+                    const defaultXI = fallbackSelection.bestXI;
+                    const safeSelect = (s) => (s && Array.isArray(s.playing11)) ? s : defaultXI;
+                    const fallbackEval = evaluationFallback(team, "Missing AI properties merged with math fallback");
+
+                    results.push({
+                        ...evalResult,
+                        teamName,
+                        bestXI: safeSelect(evalResult.bestXI),
+                        homeXI: safeSelect(evalResult.homeXI),
+                        awayXI: safeSelect(evalResult.awayXI),
+                        evaluation: {
+                            ...fallbackEval,
+                            ...(evalResult.evaluation || {})
+                        }
+                    });
+                    continue;
                 }
-            });
+            } catch (hfErr) {
+                console.log(`[AI-SINGLE] HF failed for ${teamName}: ${hfErr.message}`);
+            }
 
-            if (res.results && Array.isArray(res.results)) {
-                allResults.push(...res.results);
-            }
-            if (res.error) {
-                anyError = res.error;
-            }
+            const fallbackSelection = selectionFallback(team);
+            results.push({
+                teamId,
+                teamName,
+                bestXI: fallbackSelection.bestXI,
+                homeXI: fallbackSelection.homeXI,
+                awayXI: fallbackSelection.awayXI,
+                evaluation: evaluationFallback(team, "AI generation fallback triggered.")
+            });
         }
 
-        return teams.map(t => {
-            const teamId = t.id || t.teamName;
-            const evalResult = allResults.find(r => r.teamId === teamId);
-            
-            if (!evalResult || evalResult.fallback) {
-                const fallbackSelection = selectionFallback(t);
-                return {
-                    teamId,
-                    teamName: t.teamName,
-                    bestXI: fallbackSelection.bestXI,
-                    homeXI: fallbackSelection.homeXI,
-                    awayXI: fallbackSelection.awayXI,
-                    evaluation: evaluationFallback(t, anyError || "AI generation fallback triggered.")
-                };
-            }
-
-            // Ensure Home/Away XI exist if AI missed them
-            const fallbackSelection = selectionFallback(t);
-            const defaultXI = fallbackSelection.bestXI;
-            const safeSelect = (s) => (s && Array.isArray(s.playing11)) ? s : (evalResult.bestXI && Array.isArray(evalResult.bestXI.playing11) ? evalResult.bestXI : defaultXI);
-
-            const fallbackEval = evaluationFallback(t, "Missing AI properties merged with math fallback");
-
-            return {
-                ...evalResult,
-                teamName: t.teamName,
-                bestXI: safeSelect(evalResult.bestXI),
-                homeXI: safeSelect(evalResult.homeXI),
-                awayXI: safeSelect(evalResult.awayXI),
-                evaluation: {
-                    ...fallbackEval,
-                    ...(evalResult.evaluation || {})
-                }
-            };
-        });
+        return results;
     } catch (err) {
-        console.error("[BATCH ERROR]", err.message);
+    console.error("[AI ERROR]", err.message);
         return teams.map(t => ({
             teamId: t.id || t.teamName,
             teamName: t.name || t.teamName,

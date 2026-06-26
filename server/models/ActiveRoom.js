@@ -7,6 +7,9 @@ const activeRoomSchema = new mongoose.Schema({
     purseLimit: { type: Number, default: 12000 },
     isAiMode: { type: Boolean, default: false },
     teamCount: { type: Number, default: 10 },
+    league: { type: String, default: 'ipl' }, // [NEW] Track active league
+    currency: { type: String, default: 'inr' },
+    auctionYear: { type: String },
     hostUserId: { type: String },   // [NEW] Permanent secure host identifier
     coHostUserIds: [{ type: String }], // [NEW] Up to 3 co-hosts
     
@@ -21,7 +24,10 @@ const activeRoomSchema = new mongoose.Schema({
         currentPurse: Number,
         isBot: { type: Boolean, default: false },
         playersAcquired: { type: Array, default: [] },
-        overseasCount: { type: Number, default: 0 }
+        overseasCount: { type: Number, default: 0 },
+        rtmCards: { type: Number, default: 0 },
+        rtmUsedCount: { type: Number, default: 0 },
+        rtmUsed: { type: Boolean, default: false }
     }],
     
     unsoldHistory: { type: Array, default: [] }, // [NEW] Persist scrolling unsold list
@@ -37,7 +43,7 @@ const activeRoomSchema = new mongoose.Schema({
     
     auctionStatus: { 
         type: String, 
-        enum: ["Lobby", "ONGOING", "PAUSED", "SOLD", "Selection", "Finished"], 
+        enum: ["Lobby", "ONGOING", "PAUSED", "SOLD", "Selection", "Finished", "RTM"], 
         default: "Lobby" 
     },
     
@@ -53,6 +59,8 @@ const activeRoomSchema = new mongoose.Schema({
     isTimerRunning: { type: Boolean, default: false },
     
     currentIndex: { type: Number, default: 0 },
+    
+    rtmState: { type: Object, default: null },
     
 }, { timestamps: true });
 
