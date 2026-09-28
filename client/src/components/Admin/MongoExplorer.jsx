@@ -4,7 +4,7 @@ import {
     Database, Layers, Folder, FolderPlus, Plus, Trash2, RefreshCw,
     Search, Save, X, Copy, Upload, FileSpreadsheet, AlertCircle,
     ChevronLeft, ChevronRight, Filter, Braces, ListTree, CheckSquare,
-    Square, Settings2, Terminal
+    Square, Settings2, Terminal, ArrowRightLeft
 } from 'lucide-react';
 
 const PAGE_SIZE = 50;
@@ -76,6 +76,15 @@ const MongoExplorer = ({
     const [importStrategy, setImportStrategy] = useState('append');
     const [importError, setImportError] = useState(null);
     const [importFileName, setImportFileName] = useState('');
+
+    const [showBulkUpdateModal, setShowBulkUpdateModal] = useState(false);
+    const [showMoveModal, setShowMoveModal] = useState(false);
+    const [moveTargetCollection, setMoveTargetCollection] = useState('');
+    const [bulkTarget, setBulkTarget] = useState('all'); // 'all' | 'selected' | 'filter'
+    const [bulkFields, setBulkFields] = useState([
+        { key: '', type: 'string', defaultValue: '', groupValue: '' }
+    ]);
+    const [deleteConfirm, setDeleteConfirm] = useState({ show: false, type: null, id: null });
 
     const headers = useMemo(() => ({
         'Content-Type': 'application/json',
@@ -239,13 +248,14 @@ const MongoExplorer = ({
         if (!window.confirm('Delete this document?')) return;
         setIsProcessing(true);
         try {
+            const rawId = typeof id === 'object' && id !== null ? (id.$oid || id.toString()) : id;
             const res = await fetch(
-                `${apiUrl}/api/admin/data/delete?dbName=${selectedDb}&collectionName=${activeCollection}&id=${encodeURIComponent(id)}`,
+                `${apiUrl}/api/admin/data/delete?dbName=${encodeURIComponent(selectedDb)}&collectionName=${encodeURIComponent(activeCollection)}&id=${encodeURIComponent(rawId)}`,
                 { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
             );
             const data = await res.json();
             if (res.ok) {
-                notify('success', 'Document deleted');
+                notify('success', data.message || 'Document deleted');
                 closeEditor();
                 loadDocuments(activeCollection, page);
                 loadCollectionStats(activeCollection);
@@ -262,13 +272,14 @@ const MongoExplorer = ({
         if (!window.confirm(`Delete ${selectedIds.size} selected document(s)?`)) return;
         setIsProcessing(true);
         try {
+            const safeIds = [...selectedIds].map(id => typeof id === 'object' && id !== null ? (id.$oid || id.toString()) : id);
             const res = await fetch(`${apiUrl}/api/admin/data/bulk-delete`, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({
                     dbName: selectedDb,
                     collectionName: activeCollection,
-                    ids: [...selectedIds],
+                    ids: safeIds,
                 }),
             });
             const data = await res.json();
@@ -281,6 +292,110 @@ const MongoExplorer = ({
             } else notify('error', data.error);
         } catch {
             notify('error', 'Bulk delete failed');
+        } finally {
+            setIsProcessing(false);
+        }
+    };
+
+    const openMoveModal = () => {
+        const remaining = collections.filter(c => c !== activeCollection);
+        if (remaining.length > 0) {
+            setMoveTargetCollection(remaining[0]);
+            setShowMoveModal(true);
+        } else {
+            notify('error', 'No other collections available to move to');
+        }
+    };
+
+    const handleBulkMove = async () => {
+        if (selectedIds.size === 0) return;
+        if (!moveTargetCollection) {
+            notify('error', 'Please select a target collection');
+            return;
+        }
+        setIsProcessing(true);
+        try {
+            const res = await fetch(`${apiUrl}/api/admin/data/bulk-move`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    dbName: selectedDb,
+                    sourceCollection: activeCollection,
+                    targetCollection: moveTargetCollection,
+                    ids: [...selectedIds],
+                }),
+            });
+            const data = await res.json();
+            if (res.ok) {
+                notify('success', data.message);
+                setSelectedIds(new Set());
+                setShowMoveModal(false);
+                closeEditor();
+                loadDocuments(activeCollection, page);
+                loadCollectionStats(activeCollection);
+                if (onRefreshCollections) onRefreshCollections();
+            } else notify('error', data.error || 'Bulk move failed');
+        } catch (err) {
+            notify('error', 'Bulk move failed: ' + err.message);
+        } finally {
+            setIsProcessing(false);
+        }
+    };
+
+    const handleBulkUpdate = async () => {
+        const invalidField = bulkFields.find(f => !f.key.trim());
+        if (invalidField) {
+            notify('error', 'All field keys must be filled out');
+            return;
+        }
+        if (bulkFields.length === 0) {
+            notify('error', 'At least one field is required');
+            return;
+        }
+        setIsProcessing(true);
+        try {
+            const bodyPayload = {
+                dbName: selectedDb,
+                collectionName: activeCollection,
+                ids: [...selectedIds],
+                update: {
+                    fields: bulkFields.map(f => ({
+                        key: f.key.trim(),
+                        type: f.type,
+                        defaultValue: f.defaultValue,
+                        groupValue: f.groupValue
+                    }))
+                }
+            };
+
+            if (bulkTarget === 'filter') {
+                try {
+                    bodyPayload.filter = JSON.parse(filterText || '{}');
+                } catch {
+                    notify('error', 'Invalid MongoDB Filter JSON');
+                    setIsProcessing(false);
+                    return;
+                }
+            } else if (bulkTarget === 'all') {
+                bodyPayload.filter = {};
+            }
+
+            const res = await fetch(`${apiUrl}/api/admin/data/bulk-update`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(bodyPayload),
+            });
+            const data = await res.json();
+            if (res.ok) {
+                notify('success', data.message);
+                setShowBulkUpdateModal(false);
+                setSelectedIds(new Set());
+                closeEditor();
+                loadDocuments(activeCollection, page);
+                loadCollectionStats(activeCollection);
+            } else notify('error', data.error);
+        } catch {
+            notify('error', 'Bulk update failed');
         } finally {
             setIsProcessing(false);
         }
@@ -608,13 +723,32 @@ const MongoExplorer = ({
                                     <Plus className="w-3.5 h-3.5" /> Insert
                                 </button>
 
+                                <button
+                                    onClick={() => {
+                                        setBulkTarget(selectedIds.size > 0 ? 'selected' : 'all');
+                                        setBulkFields([{ key: '', type: 'string', defaultValue: '', groupValue: '' }]);
+                                        setShowBulkUpdateModal(true);
+                                    }}
+                                    className="px-3 py-2 rounded-xl text-xs font-bold border border-white/10 flex items-center gap-1.5 text-gray-400 hover:text-white"
+                                >
+                                    <Settings2 className="w-3.5 h-3.5 text-yellow-500" /> Bulk Fields
+                                </button>
+
                                 {selectedIds.size > 0 && (
-                                    <button
-                                        onClick={handleBulkDelete}
-                                        className="px-3 py-2 rounded-xl text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30"
-                                    >
-                                        Delete ({selectedIds.size})
-                                    </button>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={openMoveModal}
+                                            className="px-3 py-2 rounded-xl text-xs font-bold bg-yellow-500/10 text-yellow-500 border border-yellow-500/20 hover:bg-yellow-500/20 transition-all flex items-center gap-1"
+                                        >
+                                            <ArrowRightLeft className="w-3.5 h-3.5" /> Move ({selectedIds.size})
+                                        </button>
+                                        <button
+                                            onClick={handleBulkDelete}
+                                            className="px-3 py-2 rounded-xl text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 transition-all"
+                                        >
+                                            Delete ({selectedIds.size})
+                                        </button>
+                                    </div>
                                 )}
                             </div>
 
@@ -931,6 +1065,297 @@ const MongoExplorer = ({
                                     className="flex-1 py-3 rounded-xl bg-yellow-500 text-black font-black text-sm disabled:opacity-50"
                                 >
                                     Import {importData.length || 0} docs
+                                </button>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
+
+            {/* Move Documents Modal */}
+            <AnimatePresence>
+                {showMoveModal && (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowMoveModal(false)} className="absolute inset-0 bg-black/90 backdrop-blur-md" />
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            className="relative bg-[#121216] border border-white/10 w-full max-w-lg rounded-[2rem] shadow-3xl overflow-hidden max-h-[85vh] flex flex-col"
+                        >
+                            <div className="p-6 border-b border-white/5 flex justify-between items-center">
+                                <div>
+                                    <h2 className="text-xl font-black uppercase flex items-center gap-2">
+                                        <ArrowRightLeft className="w-5 h-5 text-yellow-500" /> Move Documents
+                                    </h2>
+                                    <p className="text-[10px] text-gray-500 mt-1">Source: {selectedDb}.{activeCollection}</p>
+                                </div>
+                                <button onClick={() => setShowMoveModal(false)} className="p-2 hover:bg-white/5 rounded-full"><X className="w-5 h-5" /></button>
+                            </div>
+                            <div className="p-6 space-y-6 overflow-y-auto flex-1">
+                                <p className="text-xs text-gray-400">
+                                    You are moving <strong className="text-yellow-500 font-black">{selectedIds.size}</strong> selected document(s) from <span className="font-mono bg-white/5 px-2 py-1 rounded text-white">{activeCollection}</span>.
+                                </p>
+                                <div className="space-y-2">
+                                    <label className="text-[10px] uppercase font-black text-gray-500 tracking-wider">Target Collection</label>
+                                    <select
+                                        value={moveTargetCollection}
+                                        onChange={(e) => setMoveTargetCollection(e.target.value)}
+                                        className="w-full bg-black/40 border border-white/10 rounded-2xl px-6 py-4 focus:outline-none focus:border-yellow-500/50 appearance-none cursor-pointer font-bold text-sm text-yellow-500"
+                                    >
+                                        {collections
+                                            .filter((c) => c !== activeCollection)
+                                            .map((c) => (
+                                                <option key={c} value={c}>
+                                                    {c}
+                                                </option>
+                                            ))}
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="p-6 border-t border-white/5 flex gap-3">
+                                <button onClick={() => setShowMoveModal(false)} className="flex-1 py-3 rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white transition-colors">Cancel</button>
+                                <button
+                                    onClick={handleBulkMove}
+                                    disabled={isProcessing || !moveTargetCollection}
+                                    className="flex-1 py-3 rounded-xl bg-yellow-500 text-black font-black text-sm disabled:opacity-50"
+                                >
+                                    Confirm Move
+                                </button>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
+
+            {/* Bulk Update Modal */}
+            <AnimatePresence>
+                {showBulkUpdateModal && (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowBulkUpdateModal(false)} className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            className="relative bg-[#121216] border border-white/10 w-full max-w-2xl rounded-[2rem] shadow-3xl overflow-hidden max-h-[90vh] flex flex-col"
+                        >
+                            <div className="p-6 border-b border-white/5 flex justify-between items-center bg-gradient-to-r from-yellow-500/10 to-transparent">
+                                <div>
+                                    <h2 className="text-xl font-black uppercase flex items-center gap-2">
+                                        <Settings2 className="w-5 h-5 text-yellow-500" /> Bulk Schema Ops
+                                    </h2>
+                                    <p className="text-[10px] text-gray-500 mt-1">{selectedDb}.{activeCollection}</p>
+                                </div>
+                                <button onClick={() => setShowBulkUpdateModal(false)} className="p-2 hover:bg-white/5 rounded-full"><X className="w-5 h-5" /></button>
+                            </div>
+                            <div className="p-6 space-y-5 overflow-y-auto flex-1">
+                                <div className="space-y-2">
+                                    <label className="text-[10px] uppercase font-black text-gray-500 tracking-wider">1. Target Scope</label>
+                                    <div className="flex gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setBulkTarget('all')}
+                                            className={`flex-1 py-3 rounded-xl text-xs font-black transition-all ${
+                                                bulkTarget === 'all' ? 'bg-yellow-500 text-black shadow-lg shadow-yellow-500/15' : 'bg-white/5 text-gray-400 border border-white/5'
+                                            }`}
+                                        >
+                                            All Documents
+                                        </button>
+                                        <button
+                                            type="button"
+                                            disabled={selectedIds.size === 0}
+                                            onClick={() => setBulkTarget('selected')}
+                                            className={`flex-1 py-3 rounded-xl text-xs font-black transition-all disabled:opacity-30 ${
+                                                bulkTarget === 'selected' ? 'bg-yellow-500 text-black shadow-lg shadow-yellow-500/15' : 'bg-white/5 text-gray-400 border border-white/5'
+                                            }`}
+                                        >
+                                            Selected ({selectedIds.size})
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setBulkTarget('filter')}
+                                            className={`flex-1 py-3 rounded-xl text-xs font-black transition-all ${
+                                                bulkTarget === 'filter' ? 'bg-yellow-500 text-black shadow-lg shadow-yellow-500/15' : 'bg-white/5 text-gray-400 border border-white/5'
+                                            }`}
+                                        >
+                                            By Filter
+                                        </button>
+                                    </div>
+                                    {bulkTarget === 'filter' && (
+                                        <div className="mt-2 p-3 bg-black/40 border border-white/5 rounded-xl">
+                                            <div className="text-[9px] text-yellow-500 font-bold uppercase mb-1">Active Filter JSON</div>
+                                            <code className="text-[10px] font-mono text-gray-400">{filterText || '{}'}</code>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="space-y-2">
+                                    <label className="text-[10px] uppercase font-black text-gray-500 tracking-wider">Select Players to Modify</label>
+                                    <div className="bg-black/50 border border-white/10 rounded-xl max-h-48 overflow-y-auto divide-y divide-white/5 custom-scrollbar">
+                                        {documents.map((d) => {
+                                            const idStr = String(d._id);
+                                            const isSelected = selectedIds.has(d._id) || selectedIds.has(idStr);
+                                            const displayName = d.name || d.player || d.Player || idStr;
+                                            return (
+                                                <label key={idStr} className="flex items-center gap-3 px-4 py-2.5 cursor-pointer hover:bg-white/5 transition-colors select-none text-xs font-bold text-gray-300 hover:text-white">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={isSelected}
+                                                        onChange={() => {
+                                                            setSelectedIds((prev) => {
+                                                                const next = new Set(prev);
+                                                                if (next.has(d._id)) {
+                                                                    next.delete(d._id);
+                                                                } else if (next.has(idStr)) {
+                                                                    next.delete(idStr);
+                                                                } else {
+                                                                    next.add(d._id);
+                                                                }
+                                                                return next;
+                                                            });
+                                                        }}
+                                                        className="accent-yellow-500 rounded border-white/10"
+                                                    />
+                                                    <span className="truncate flex-1">{displayName}</span>
+                                                    {(d.role || d.Role) && <span className="text-[9px] bg-white/5 px-1.5 py-0.5 rounded text-gray-500 uppercase tracking-tighter shrink-0">{d.role || d.Role}</span>}
+                                                </label>
+                                            );
+                                        })}
+                                        {documents.length === 0 && (
+                                            <div className="p-4 text-center text-xs text-gray-500 italic">No players in this collection</div>
+                                        )}
+                                    </div>
+                                    <div className="flex justify-between items-center text-[10px] text-gray-500 font-bold px-1">
+                                        <span>Selected: {selectedIds.size} player(s)</span>
+                                        <div className="flex gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setSelectedIds(new Set(documents.map((d) => d._id)));
+                                                    setBulkTarget('selected');
+                                                }}
+                                                className="hover:text-yellow-500 transition-colors"
+                                            >
+                                                Select All
+                                            </button>
+                                            <span>•</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setSelectedIds(new Set());
+                                                    setBulkTarget('all');
+                                                }}
+                                                className="hover:text-red-400 transition-colors"
+                                            >
+                                                Clear All
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-4">
+                                    <div className="flex justify-between items-center">
+                                        <label className="text-[10px] uppercase font-black text-gray-500 tracking-wider">2. Schema Field Attributes (Keys)</label>
+                                        <button
+                                            type="button"
+                                            onClick={() => setBulkFields([...bulkFields, { key: '', type: 'string', defaultValue: '', groupValue: '' }])}
+                                            className="px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider bg-yellow-500/10 hover:bg-yellow-500 text-yellow-500 hover:text-black border border-yellow-500/20 hover:border-transparent flex items-center gap-1 transition-all"
+                                        >
+                                            <Plus className="w-3 h-3" /> Add Field
+                                        </button>
+                                    </div>
+
+                                    <div className="space-y-4 max-h-[350px] overflow-y-auto pr-1 custom-scrollbar">
+                                        {bulkFields.map((field, index) => (
+                                            <div key={index} className="p-4 bg-white/[0.02] border border-white/5 hover:border-white/10 rounded-2xl space-y-3 relative group transition-all">
+                                                {bulkFields.length > 1 && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setBulkFields(bulkFields.filter((_, i) => i !== index))}
+                                                        className="absolute top-3 right-3 p-1.5 bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white rounded-lg opacity-60 hover:opacity-100 transition-all border border-red-500/10"
+                                                        title="Remove field"
+                                                    >
+                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                    </button>
+                                                )}
+                                                <div className="text-[9px] font-bold text-gray-500 uppercase tracking-widest">Field #{index + 1}</div>
+                                                
+                                                <div className="grid grid-cols-3 gap-3">
+                                                    <div className="col-span-2 space-y-1.5">
+                                                        <label className="text-[9px] uppercase font-black text-gray-500 tracking-wider">Field Attribute (Key)</label>
+                                                        <input
+                                                            type="text"
+                                                            placeholder="e.g. bowling_hand"
+                                                            value={field.key}
+                                                            onChange={(e) => {
+                                                                const updated = [...bulkFields];
+                                                                updated[index].key = e.target.value;
+                                                                setBulkFields(updated);
+                                                            }}
+                                                            className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs focus:border-yellow-500/50 outline-none text-white font-medium placeholder:text-gray-600"
+                                                        />
+                                                    </div>
+                                                    <div className="space-y-1.5">
+                                                        <label className="text-[9px] uppercase font-black text-gray-500 tracking-wider">Data Type</label>
+                                                        <select
+                                                            value={field.type}
+                                                            onChange={(e) => {
+                                                                const updated = [...bulkFields];
+                                                                updated[index].type = e.target.value;
+                                                                setBulkFields(updated);
+                                                            }}
+                                                            className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs focus:border-yellow-500/50 outline-none text-white font-bold cursor-pointer appearance-none uppercase"
+                                                        >
+                                                            <option value="string">String</option>
+                                                            <option value="number">Number</option>
+                                                            <option value="boolean">Boolean</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <div className="space-y-1.5">
+                                                        <label className="text-[9px] uppercase font-black text-gray-400 tracking-wider">Default Value (All Documents)</label>
+                                                        <input
+                                                            type="text"
+                                                            placeholder={field.type === 'boolean' ? 'true / false' : (field.type === 'number' ? '0' : 'e.g. Right Handed')}
+                                                            value={field.defaultValue}
+                                                            onChange={(e) => {
+                                                                const updated = [...bulkFields];
+                                                                updated[index].defaultValue = e.target.value;
+                                                                setBulkFields(updated);
+                                                            }}
+                                                            className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs focus:border-yellow-500/50 outline-none text-white font-medium placeholder:text-gray-600"
+                                                        />
+                                                    </div>
+                                                    <div className="space-y-1.5">
+                                                        <label className="text-[9px] uppercase font-black text-gray-400 tracking-wider">Group Value (Selected Only)</label>
+                                                        <input
+                                                            type="text"
+                                                            placeholder={field.type === 'boolean' ? 'true / false' : (field.type === 'number' ? '0' : 'e.g. Left Handed')}
+                                                            value={field.groupValue}
+                                                            onChange={(e) => {
+                                                                const updated = [...bulkFields];
+                                                                updated[index].groupValue = e.target.value;
+                                                                setBulkFields(updated);
+                                                            }}
+                                                            className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs focus:border-yellow-500/50 outline-none text-white font-medium placeholder:text-gray-600"
+                                                        />
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="p-6 border-t border-white/5 flex gap-3">
+                                <button onClick={() => setShowBulkUpdateModal(false)} className="flex-1 py-3 rounded-xl border border-white/10 text-xs font-black uppercase tracking-wider text-gray-400 hover:text-white transition-colors">Cancel</button>
+                                <button
+                                    onClick={handleBulkUpdate}
+                                    disabled={isProcessing || bulkFields.length === 0 || bulkFields.some(f => !f.key.trim())}
+                                    className="flex-1 py-3 rounded-xl bg-yellow-500 text-black font-black text-xs uppercase tracking-widest disabled:opacity-50 shadow-lg shadow-yellow-500/10 active:scale-95 transition-all"
+                                >
+                                    Run Bulk Update
                                 </button>
                             </div>
                         </motion.div>

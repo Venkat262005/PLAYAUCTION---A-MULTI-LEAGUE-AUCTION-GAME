@@ -16,6 +16,9 @@ export const VoiceProvider = ({ children }) => {
     const localStreamRef = useRef(null);
     const peersRef = useRef(new Map()); // socketId -> RTCPeerConnection
     const isSpeakerOnRef = useRef(true);
+    const audioContextRef = useRef(null);
+    const gainNodeRef = useRef(null);
+    const destinationStreamRef = useRef(null);
 
     const applySpeakerToRemoteAudio = useCallback((enabled) => {
         document.querySelectorAll('audio[id^="remote-audio-"]').forEach((audio) => {
@@ -69,6 +72,12 @@ export const VoiceProvider = ({ children }) => {
             localStreamRef.current.getTracks().forEach(track => track.stop());
             localStreamRef.current = null;
         }
+        if (audioContextRef.current) {
+            audioContextRef.current.close().catch(e => console.warn("[VOICE-CLEANUP] Failed to close audio context:", e));
+            audioContextRef.current = null;
+        }
+        gainNodeRef.current = null;
+        destinationStreamRef.current = null;
         setIsJoined(false);
         setIsMuted(true);
         setIsSpeakerOn(true);
@@ -81,9 +90,9 @@ export const VoiceProvider = ({ children }) => {
         peersRef.current.set(remoteSocketId, pc);
 
         // Add local tracks BEFORE creating offer/answer
-        if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach(track => {
-                pc.addTrack(track, localStreamRef.current);
+        if (destinationStreamRef.current) {
+            destinationStreamRef.current.getTracks().forEach(track => {
+                pc.addTrack(track, destinationStreamRef.current);
             });
         }
         
@@ -114,6 +123,10 @@ export const VoiceProvider = ({ children }) => {
             audio.srcObject = event.streams[0];
             audio.muted = !isSpeakerOnRef.current;
             audio.volume = isSpeakerOnRef.current ? 1 : 0;
+            // Explicitly play remote stream to bypass autoplay blocks
+            audio.play().catch(err => {
+                console.warn("[VOICE] Autoplay blocked for remote audio. Attempting play on user gesture:", err);
+            });
         };
 
         pc.oniceconnectionstatechange = () => {
@@ -132,8 +145,25 @@ export const VoiceProvider = ({ children }) => {
             console.log(`[VOICE] Requesting microphone access for room ${roomCode}...`);
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             localStreamRef.current = stream;
-            // Start listen-only: speaker on, mic off (Free Fire style)
-            stream.getAudioTracks().forEach((track) => { track.enabled = false; });
+            
+            // Set up Web Audio API to route microphone through GainNode
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            const audioCtx = new AudioContextClass();
+            audioContextRef.current = audioCtx;
+            await audioCtx.resume();
+
+            const source = audioCtx.createMediaStreamSource(stream);
+            const gainNode = audioCtx.createGain();
+            // Start listen-only: speaker on, mic muted via GainNode
+            gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+            gainNodeRef.current = gainNode;
+
+            const destination = audioCtx.createMediaStreamDestination();
+            destinationStreamRef.current = destination.stream;
+
+            source.connect(gainNode);
+            gainNode.connect(destination);
+
             setIsJoined(true);
             setIsMuted(true);
             setIsSpeakerOn(true);
@@ -155,13 +185,11 @@ export const VoiceProvider = ({ children }) => {
     }, [socket, cleanup]);
 
     const toggleMute = useCallback(() => {
-        if (localStreamRef.current) {
+        if (gainNodeRef.current && audioContextRef.current) {
             const newMuted = !isMuted;
-            localStreamRef.current.getAudioTracks().forEach(track => {
-                track.enabled = !newMuted;
-            });
+            gainNodeRef.current.gain.setValueAtTime(newMuted ? 0 : 1, audioContextRef.current.currentTime);
             setIsMuted(newMuted);
-            console.log(`[VOICE] Local mic ${newMuted ? 'MUTED' : 'UNMUTED'}`);
+            console.log(`[VOICE] Local mic ${newMuted ? 'MUTED' : 'UNMUTED'} via GainNode`);
         }
     }, [isMuted]);
 

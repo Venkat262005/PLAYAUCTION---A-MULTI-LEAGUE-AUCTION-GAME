@@ -49,7 +49,23 @@ const buildPlayerSearchFilter = (q) => {
 };
 
 const buildPlayerIdQuery = (playerId) => {
-    const idStr = String(playerId);
+    let raw = playerId;
+    if (typeof playerId === 'string') {
+        const trimmed = playerId.trim();
+        if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+            raw = trimmed.slice(1, -1);
+        }
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                if (parsed.$oid) raw = parsed.$oid;
+            } catch {}
+        }
+    } else if (typeof playerId === 'object' && playerId !== null && playerId.$oid) {
+        raw = playerId.$oid;
+    }
+
+    const idStr = String(raw).trim();
     const query = {
         $or: [
             { playerId: idStr },
@@ -57,9 +73,15 @@ const buildPlayerIdQuery = (playerId) => {
             { _id: idStr },
         ],
     };
-    const num = Number(playerId);
-    if (!Number.isNaN(num)) query.$or.push({ id: num }, { playerId: num });
-    if (ObjectId.isValid(idStr)) query.$or.push({ _id: new ObjectId(idStr) });
+    const num = Number(idStr);
+    if (!Number.isNaN(num)) {
+        query.$or.push({ id: num }, { playerId: num }, { _id: num });
+    }
+    if (ObjectId.isValid(idStr)) {
+        try {
+            query.$or.push({ _id: new ObjectId(idStr) });
+        } catch {}
+    }
     return query;
 };
 

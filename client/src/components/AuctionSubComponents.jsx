@@ -1,7 +1,7 @@
 import React, { memo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X } from "lucide-react";
-import { getFlagUrl, fmtCr, LEAGUE_DEFAULTS, resolvePlayerImageUrl, getPlayerImageFallback } from "../utils/playerUtils";
+import { getFlagUrl, fmtCr, fmtParts, LEAGUE_DEFAULTS, resolvePlayerImageUrl, getPlayerImageFallback } from "../utils/playerUtils";
 
 /** Sold / unsold feed row — team logo, owner, player → price, team slogan */
 const AuctionFeedLine = memo(({
@@ -132,6 +132,7 @@ const TeamRow = memo(({
   const activeCurrency = currency || LEAGUE_DEFAULTS[league] || 'inr';
   const sourceCurrency = LEAGUE_DEFAULTS[league] || 'inr';
   const fmt = (lakhs) => fmtCr(lakhs, activeCurrency, sourceCurrency);
+  const fmtP = (lakhs) => fmtParts(lakhs, activeCurrency, sourceCurrency);
 
   // Use lightweight role counts from server or calculate if roster available
   const counts = t.roleCounts || (roster || []).reduce((acc, p) => {
@@ -217,9 +218,16 @@ const TeamRow = memo(({
           </div>
         </div>
         <div className="flex flex-col items-end">
-          <span className="font-mono font-black text-lg lg:text-xl text-white leading-none">
-            {fmt(t.currentPurse)}
-          </span>
+          <div className="flex items-baseline gap-1.5 flex-nowrap">
+            <span className="font-mono font-black text-lg lg:text-xl text-white leading-none">
+              {fmtP(t.currentPurse).primary}
+            </span>
+            {fmtP(t.currentPurse).secondary && (
+              <span className="text-[10px] lg:text-xs font-bold text-[#FFE58F]/80 leading-none whitespace-nowrap">
+                ({fmtP(t.currentPurse).secondary})
+              </span>
+            )}
+          </div>
           <span className="text-[8px] font-black text-slate-500 tracking-tighter uppercase mt-1">
             PURSE REMAINING
           </span>
@@ -273,15 +281,15 @@ const TeamRow = memo(({
               const playerRecord = allPlayersMap[p.player] || allPlayersMap[p._id] || {};
               let displayName = p.name || playerRecord.name || playerRecord.player || p.player || "Unknown";
               const role = (p.role || playerRecord.role || "").toLowerCase();
-              let roleIcon = <img src="https://cdn-icons-png.flaticon.com/128/2160/2160153.png" alt="Batter" className="w-3 h-3 invert opacity-80" />;
-              if (role.includes("wk")) roleIcon = <img src="/role-wk.png" alt="WK" className="w-3.5 h-3 invert opacity-80" />;
-              else if (role.includes("all") || role.includes("ar")) roleIcon = (
-                  <div className="flex gap-0.5 items-center">
-                    <img src="https://cdn-icons-png.flaticon.com/128/2160/2160153.png" alt="All-Rounder" className="w-3 h-3 invert opacity-80" />
-                    <img src="/role-bowler.png" alt="All-Rounder" className="w-3 h-3 invert opacity-80" />
-                  </div>
-              );
-              else if (role.includes("bowl")) roleIcon = <img src="/role-bowler.png" alt="Bowler" className="w-3 h-3 invert opacity-80" />;
+              
+              let roleIcon = <img src="/game_logos/cricket-bat.png" alt="Batter" className="w-3.5 h-3.5 invert opacity-80" />;
+              if (role.includes("wk")) {
+                roleIcon = <img src="/game_logos/game.png" alt="WK" className="w-3.5 h-3.5 invert opacity-80" />;
+              } else if (role.includes("all") || role.includes("ar")) {
+                roleIcon = <img src="/game_logos/cricket.png" alt="All-Rounder" className="w-3.5 h-3.5 invert opacity-80" />;
+              } else if (role.includes("bowl")) {
+                roleIcon = <img src="/game_logos/ball.png" alt="Bowler" className="w-3.5 h-3.5 invert opacity-80" />;
+              }
 
               const nationality = p.nationality || playerRecord.nationality || "";
               const isOverseas = p.isOverseas || p.overseas || playerRecord.isOverseas ||
@@ -293,7 +301,7 @@ const TeamRow = memo(({
                   className="flex justify-between items-center text-[10px] font-bold bg-[#1a1205]/60 px-2.5 py-1.5 rounded-xl border border-[#D4AF37]/10 hover:bg-[#241607]/70 transition-colors"
                 >
                   <div className="flex items-center gap-2 overflow-hidden">
-                    {isOverseas && <span className="shrink-0 text-[10px]">✈️</span>}
+                    {isOverseas && <img src="/game_logos/airplane.png" alt="Overseas" className="w-3.5 h-3.5 invert opacity-80 shrink-0" />}
                     <span className="truncate text-slate-300">{displayName}</span>
                     <span className="shrink-0 opacity-60">{roleIcon}</span>
                   </div>

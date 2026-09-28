@@ -1,7 +1,12 @@
-const { evaluateTeamWithGemini } = require("./geminiTeamEvaluation");
+const { evaluateTeamWithGemini, evaluateTeamWithGroq } = require("./geminiTeamEvaluation");
 
 const HF_KEY = process.env.HUGGINGFACE_API_KEY;
-const HF_MODEL = process.env.HUGGINGFACE_MODEL || "openai/gpt-oss-20b";
+const HF_MODEL = process.env.HUGGINGFACE_MODEL || "openai/gpt-oss-120b";
+
+// Rate limit: delay in ms between team evaluations (increased to 25s for absolute safety)
+const EVAL_RATE_DELAY_MS = parseInt(process.env.AI_EVAL_RATE_DELAY_MS || '25000', 10);
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ───────── SAFE PARSER ─────────
 function safeParse(text) {
@@ -24,16 +29,61 @@ function safeParse(text) {
     }
 }
 
-// ───────── HUGGING FACE ─────────
+// ───────── HF SINGLE-TEAM (gpt-oss-120b) ─────────
+async function evaluateTeamWithHF(teamData) {
+    if (!HF_KEY || HF_KEY === "hf_your_token_here") throw new Error("MISSING_HF_KEY");
+
+    const { buildPrompt, robustValidateAndNormalize, normalizeSingleTeamResult } = require("./geminiTeamEvaluation");
+    const prompt = buildPrompt(teamData);
+
+    const league = String(teamData.league || "IPL").toUpperCase();
+    const systemPrompt = [
+        `You are an elite ${league} franchise analyst, auction strategist, and team selector.`,
+        "Analyze the given squad like a professional scouting department.",
+        "Return ONLY valid JSON. No markdown. No explanation. No extra text."
+    ].join(" ");
+
+    const baseUrl = process.env.AI_BASE_URL || "https://router.huggingface.co/v1/chat/completions";
+    const res = await fetch(baseUrl, {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${HF_KEY}`,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            model: HF_MODEL,
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: prompt }
+            ],
+            max_tokens: 1500,
+            temperature: 0
+        })
+    });
+
+    if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(`HF_STATUS_${res.status}: ${JSON.stringify(errBody)}`);
+    }
+
+    const data = await res.json();
+    const text = data.choices?.[0]?.message?.content || "";
+    if (!text.trim()) throw new Error("HF_EMPTY_RESPONSE");
+
+    const parsed = robustValidateAndNormalize(text, teamData);
+    return normalizeSingleTeamResult(parsed);
+}
+
+// ───────── LEGACY HF BATCH ─────────
 async function huggingfaceAdapterBatch(teamsData) {
     if (!teamsData || !teamsData.length) return { results: [] };
-    
+
     if (!HF_KEY || HF_KEY === "hf_your_token_here") {
         throw new Error("MISSING_HF_KEY");
     }
-    
+
     console.log(`[HF BATCH] Launching unified batched evaluation for ${teamsData.length} teams...`);
-    
+
     const prompt = batchedPrompt(teamsData);
     const systemPrompt = "Reasoning: high\nYou are an ELITE IPL Analyst. You process ALL teams in the batch and output an array of precise results. ONLY output valid JSON following the schema perfectly. Do NOT truncate the JSON output.";
 
@@ -63,19 +113,19 @@ async function huggingfaceAdapterBatch(teamsData) {
 
         const data = await res.json();
         const msg = data.choices ? data.choices[0].message : null;
-        
+
         if (!msg) throw new Error("HF_EMPTY");
-        
+
         let text = msg.content || "";
         if (msg.reasoning && msg.reasoning.trim() !== "") {
             text += "\n" + msg.reasoning;
         }
-        
+
         if (!text || text.trim() === "") throw new Error("HF_EMPTY");
-        
+
         const parsed = safeParse(text);
         if (!parsed.results || !Array.isArray(parsed.results)) throw new Error("INVALID_BATCH_SCHEMA");
-        
+
         return parsed;
     } catch (err) {
         console.error(`[HF BATCH ERROR]`, err.message);
@@ -155,11 +205,11 @@ function getHomePitch(teamName) {
 // ───────── FALLBACKS ─────────
 function selectionFallback(team) {
     const players = team.playersAcquired || [];
-    
+
     const batPool = [];
     const arPool = [];
     const bowlPool = [];
-    
+
     players.forEach(p => {
         const role = (p.role || "").toLowerCase();
         if (role.includes("all") || role.includes("ar") || role.includes("allrounder")) {
@@ -182,15 +232,15 @@ function selectionFallback(team) {
 
     const corePlayers = [...selectedBatsmen, ...selectedArs, ...selectedBowlers];
     const coreNames = corePlayers.map(p => p.name);
-    
+
     const playing11 = coreNames.slice(0, 11);
-    
+
     const remainingPlayers = players
         .filter(p => !coreNames.includes(p.name))
         .sort(sortByPoints);
-        
+
     const impactPlayers = [
-        ...coreNames.slice(11), 
+        ...coreNames.slice(11),
         ...remainingPlayers.map(p => p.name)
     ].slice(0, 4);
 
@@ -198,7 +248,7 @@ function selectionFallback(team) {
         playing11: playing11,
         impactPlayers: impactPlayers
     };
-    
+
     return {
         teamId: team.id || team.teamName,
         bestXI: xi,
@@ -209,16 +259,16 @@ function selectionFallback(team) {
 
 function evaluationFallback(team, errorMsg = "") {
     const players = team.playersAcquired || [];
-    
+
     const batPool = [];
     const arPool = [];
     const wkPool = [];
     const bowlPool = [];
-    
+
     players.forEach(p => {
         const role = (p.role || "").toLowerCase();
         const score = parseFloat(p.points || 0);
-        
+
         if (role.includes("wk") || role.includes("wicket") || role.includes("keeper")) {
             wkPool.push(score);
         } else if (role.includes("all") || role.includes("ar") || role.includes("allrounder")) {
@@ -276,13 +326,14 @@ function evaluationFallback(team, errorMsg = "") {
 }
 
 // ───────── MAIN SERVICE ─────────
-async function evaluateAllTeams(teams) {
+async function evaluateAllTeams(teams, league = 'ipl') {
     if (!teams || teams.length === 0) return [];
-    console.log(`[AI-TEAM] Evaluating ${teams.length} teams individually...`);
+    console.log(`[AI-TEAM] Evaluating ${teams.length} teams individually for league ${league}...`);
 
     // Enrich with pitch and budget context
     const enrichedInput = teams.map(t => ({
         ...t,
+        league: t.league || league,
         home_pitch: getHomePitch(t.name || t.teamName),
         budget: {
             total: t.currentPurse || 0,
@@ -293,13 +344,24 @@ async function evaluateAllTeams(teams) {
     try {
         const results = [];
 
-        for (const team of enrichedInput) {
+        for (let i = 0; i < enrichedInput.length; i++) {
+            const team = enrichedInput[i];
             const teamId = team.id || team.teamName;
             const teamName = team.teamName || team.name;
             console.log(`[AI-SINGLE] Evaluating ${teamName} as one request...`);
 
+            // Rate limit: wait between requests (skip delay for the first team)
+            if (i > 0) {
+                console.log(`[AI-RATE] Waiting ${EVAL_RATE_DELAY_MS}ms before next team evaluation...`);
+                await delay(EVAL_RATE_DELAY_MS);
+            }
+
             try {
+                // Try Gemini first
+                console.log(`[AI-SINGLE] Trying Gemini for ${teamName}...`);
                 const evalResult = await evaluateTeamWithGemini(team);
+                console.log(`[AI-SINGLE] ✅ Gemini succeeded for ${teamName}`);
+
                 const fallbackSelection = selectionFallback(team);
                 const defaultXI = fallbackSelection.bestXI;
                 const safeSelect = (s) => (s && Array.isArray(s.playing11)) ? s : defaultXI;
@@ -318,13 +380,12 @@ async function evaluateAllTeams(teams) {
                 });
                 continue;
             } catch (geminiErr) {
-                console.log(`[AI-SINGLE] Gemini failed for ${teamName}: ${geminiErr.message}`);
-            }
+                console.log(`[AI-SINGLE] Gemini failed for ${teamName}: ${geminiErr.message}. Trying Groq fallback...`);
+                try {
+                    // Try Groq as fallback
+                    const evalResult = await evaluateTeamWithGroq(team);
+                    console.log(`[AI-SINGLE] ✅ Groq succeeded for ${teamName}`);
 
-            try {
-                const hfRes = await huggingfaceAdapterBatch([team]);
-                const evalResult = hfRes?.results?.[0];
-                if (evalResult && !evalResult.fallback) {
                     const fallbackSelection = selectionFallback(team);
                     const defaultXI = fallbackSelection.bestXI;
                     const safeSelect = (s) => (s && Array.isArray(s.playing11)) ? s : defaultXI;
@@ -342,9 +403,9 @@ async function evaluateAllTeams(teams) {
                         }
                     });
                     continue;
+                } catch (groqErr) {
+                    console.log(`[AI-SINGLE] Groq failed for ${teamName}: ${groqErr.message}. Falling back directly to mathematical fallback.`);
                 }
-            } catch (hfErr) {
-                console.log(`[AI-SINGLE] HF failed for ${teamName}: ${hfErr.message}`);
             }
 
             const fallbackSelection = selectionFallback(team);
@@ -354,13 +415,30 @@ async function evaluateAllTeams(teams) {
                 bestXI: fallbackSelection.bestXI,
                 homeXI: fallbackSelection.homeXI,
                 awayXI: fallbackSelection.awayXI,
-                evaluation: evaluationFallback(team, "AI generation fallback triggered.")
             });
         }
+        // Ensure unique overallScores and ratings for all teams in the batch/room (no ties)
+        results.sort((a, b) => (b.evaluation?.overallScore || 0) - (a.evaluation?.overallScore || 0));
+        const usedScores = new Set();
+        results.forEach(r => {
+            if (r.evaluation) {
+                let score = r.evaluation.overallScore || 0;
+                while (usedScores.has(score)) {
+                    score -= 1;
+                }
+                if (score < 0) score = 0;
+                usedScores.add(score);
+                r.evaluation.overallScore = score;
+                r.evaluation.rating = score;
+                
+                // Update auction grade accordingly
+                r.evaluation.auction_grade = score >= 90 ? "A" : (score >= 80 ? "B+" : (score >= 70 ? "B" : (score >= 60 ? "C" : "D")));
+            }
+        });
 
         return results;
     } catch (err) {
-    console.error("[AI ERROR]", err.message);
+        console.error("[AI ERROR]", err.message);
         return teams.map(t => ({
             teamId: t.id || t.teamName,
             teamName: t.name || t.teamName,
@@ -370,7 +448,80 @@ async function evaluateAllTeams(teams) {
     }
 }
 
+async function evaluateCustomTeamLineup(team, league = 'ipl') {
+    const teamName = team.teamName || team.name || team.teamId;
+    console.log(`[AI-CUSTOM] Evaluating custom lineup for ${teamName} (${league})...`);
+
+    const enrichedTeam = {
+        ...team,
+        teamName,
+        isCustomLineup: true,
+        league: team.league || league,
+        home_pitch: getHomePitch(teamName),
+        budget: {
+            total: team.currentPurse || 0,
+            player_costs: (team.playersAcquired || []).reduce((acc, p) => ({ ...acc, [p.name || p.player]: p.boughtFor }), {})
+        }
+    };
+
+    let evalResult;
+    try {
+        console.log(`[AI-CUSTOM] Trying Gemini for ${teamName}...`);
+        evalResult = await evaluateTeamWithGemini(enrichedTeam);
+        console.log(`[AI-CUSTOM] ✅ Gemini succeeded for ${teamName}`);
+    } catch (geminiErr) {
+        console.log(`[AI-CUSTOM] Gemini failed for ${teamName}: ${geminiErr.message}. Trying Groq fallback...`);
+        try {
+            evalResult = await evaluateTeamWithGroq(enrichedTeam);
+            console.log(`[AI-CUSTOM] ✅ Groq succeeded for ${teamName}`);
+        } catch (groqErr) {
+            console.log(`[AI-CUSTOM] Groq failed for ${teamName}: ${groqErr.message}. Applying fallback...`);
+            const fallbackEval = evaluationFallback(enrichedTeam, groqErr.message);
+            evalResult = {
+                teamId: enrichedTeam.teamId || teamName,
+                teamName: teamName,
+                bestXI: {
+                    playing11: enrichedTeam.customPlayingXI,
+                    impactPlayers: (enrichedTeam.customBenchReserves || []).slice(0, 4)
+                },
+                evaluation: {
+                    ...fallbackEval,
+                    summary: `Custom lineup review based on manager's chosen Starting XI: ${enrichedTeam.customPlayingXI.join(', ')}.`
+                }
+            };
+        }
+    }
+
+    const safeSelect = (s) => (s && Array.isArray(s.playing11) && s.playing11.length === 11) ? s : {
+        playing11: enrichedTeam.customPlayingXI,
+        impactPlayers: (enrichedTeam.customBenchReserves || []).slice(0, 4)
+    };
+
+    const finalBestXI = safeSelect(evalResult.bestXI);
+    const finalEval = {
+        ...evaluationFallback(enrichedTeam, "Custom Lineup Evaluated"),
+        ...(evalResult.evaluation || {}),
+        customLineupApplied: true,
+        customPlayingXI: enrichedTeam.customPlayingXI,
+        customBenchReserves: enrichedTeam.customBenchReserves || []
+    };
+
+    // Calculate rating and auction grade
+    const score = finalEval.overallScore ?? finalEval.rating ?? 75;
+    finalEval.overallScore = score;
+    finalEval.rating = score;
+    finalEval.auction_grade = score >= 90 ? "A" : (score >= 80 ? "B+" : (score >= 70 ? "B" : (score >= 60 ? "C" : "D")));
+
+    return {
+        ...evalResult,
+        teamName,
+        bestXI: finalBestXI,
+        evaluation: finalEval
+    };
+}
+
 module.exports = {
     evaluateAllTeams,
+    evaluateCustomTeamLineup,
     getHomePitch
 };

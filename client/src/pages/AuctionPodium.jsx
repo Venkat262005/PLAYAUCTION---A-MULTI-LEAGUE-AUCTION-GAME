@@ -26,9 +26,22 @@ import {
     ChatSection,
 } from "../components/AuctionSubComponents";
 import Toast from "../components/Toast";
+import WildcardDraftCenter from "../components/WildcardDraftCenter";
 
 import { playBidSound, playWarningBeep, playLegendIntro, stopLegendIntro } from "../utils/soundEngine";
-import { getFlagUrl, getRoleDisplayName, fmtCr, LEAGUE_DEFAULTS, resolvePlayerImageUrl, getPlayerImageFallback } from "../utils/playerUtils";
+import { 
+    getFlagUrl, 
+    getRoleDisplayName, 
+    fmtCr, 
+    fmtParts,
+    LEAGUE_DEFAULTS, 
+    resolvePlayerImageUrl, 
+    getPlayerImageFallback,
+    getPlayerBattingPosition,
+    getPlayerBowlingType,
+    getPlayerBattingStyle,
+    getPlayerHandedness
+} from "../utils/playerUtils";
 import { getLegendMetadata, isLegendPlayer } from "../utils/legendConfig";
 import { getMinIncrement, getNextBidAmount } from "../utils/bidRules";
 import { resolveTeamShort } from "../utils/teamSlogans";
@@ -63,6 +76,10 @@ const AuctionPodium = () => {
     const [rtmState, setRtmState] = useState(null);
     const fmt = useCallback((lakhs) => {
         return fmtCr(lakhs, gameState?.currency || 'inr', LEAGUE_DEFAULTS[gameState?.league] || 'inr');
+    }, [gameState?.currency, gameState?.league]);
+
+    const fmtP = useCallback((lakhs) => {
+        return fmtParts(lakhs, gameState?.currency || 'inr', LEAGUE_DEFAULTS[gameState?.league] || 'inr');
     }, [gameState?.currency, gameState?.league]);
 
     const [activeTeams, setActiveTeams] = useState(gameState?.teams || []);
@@ -758,6 +775,27 @@ const AuctionPodium = () => {
             }
         };
 
+        const handleWildcardPhaseStarted = ({ unsoldPlayers, picks, skips }) => {
+            setGameState(prev => ({
+                ...prev,
+                status: 'Wildcard',
+                wildcardUnsoldPlayers: unsoldPlayers,
+                wildcardPicks: picks,
+                wildcardSkips: skips
+            }));
+        };
+
+        const handleWildcardStateUpdated = ({ unsoldPlayers, picks, skips, teams }) => {
+            setGameState(prev => ({
+                ...prev,
+                wildcardUnsoldPlayers: unsoldPlayers,
+                wildcardPicks: picks,
+                wildcardSkips: skips,
+                teams: teams
+            }));
+            setActiveTeams(teams);
+        };
+
         const handleSettingsUpdated = ({ timerDuration, timer }) => {
             console.log("Settings updated! New duration:", timerDuration, "activeTimer:", timer);
             setGameState(prev => prev ? { ...prev, timerDuration } : null);
@@ -850,6 +888,8 @@ const AuctionPodium = () => {
         socket.on("quiz_phase_ended", handleQuizPhaseEnded);
         socket.on("settings_updated", handleSettingsUpdated);
         socket.on("host_changed", handleHostChanged);
+        socket.on("wildcard_phase_started", handleWildcardPhaseStarted);
+        socket.on("wildcard_state_updated", handleWildcardStateUpdated);
         
         socket.on("evaluation_started", handleEvaluationStarted);
         socket.on("evaluation_timer_tick", ({ timer }) => {
@@ -902,6 +942,8 @@ const AuctionPodium = () => {
             socket.off("quiz_phase_ended", handleQuizPhaseEnded);
             socket.off("settings_updated", handleSettingsUpdated);
             socket.off("host_changed", handleHostChanged);
+            socket.off("wildcard_phase_started", handleWildcardPhaseStarted);
+            socket.off("wildcard_state_updated", handleWildcardStateUpdated);
             socket.off("evaluation_started", handleEvaluationStarted);
             socket.off("evaluation_timer_tick");
             socket.off("auction_paused");
@@ -1060,6 +1102,19 @@ const AuctionPodium = () => {
                     </p>
                 )}
             </div>
+        );
+    }
+
+    if (gameState?.status === "Wildcard") {
+        return (
+            <WildcardDraftCenter
+                gameState={gameState}
+                myTeam={myTeam}
+                fmt={fmt}
+                socket={socket}
+                roomCode={roomCode}
+                isHost={isHost}
+            />
         );
     }
 
@@ -1720,10 +1775,37 @@ const AuctionPodium = () => {
                                 >
                                     {/* Frame Corner Ornaments */}
 
-                                    {/* Premium Glowing Role Badge - Top Right */}
-                                    <div className="absolute top-6 right-5 sm:top-6 sm:right-6 z-30 flex flex-col items-center gap-1.5 drop-shadow-md">
-                                        <div className="px-3 sm:px-4 py-1 bg-gradient-to-r from-[#FFE58F] to-[#D4AF37] text-[#080400] rounded-[4px] font-black font-sans text-[9px] sm:text-[11px] tracking-widest uppercase whitespace-nowrap shadow-sm">
-                                            {getRoleDisplayName(currentPlayer.role)}
+                                    {/* Dynamic Player Attribute Badge - Top Left (Decreased Size) */}
+                                    {(() => {
+                                        const battingPos = getPlayerBattingPosition(currentPlayer);
+                                        const bowlingType = getPlayerBowlingType(currentPlayer);
+
+                                        // Only show position (for batters/allrounders) and bowling type (for bowlers/allrounders)
+                                        // Handedness is now integrated into top-right role badge (LH BAT, RH BOWL, etc.)
+                                        const badges = [];
+                                        if (battingPos) badges.push(battingPos);
+                                        if (bowlingType) badges.push(bowlingType);
+
+                                        if (badges.length === 0) return null;
+
+                                        return (
+                                            <div className="absolute top-5 left-4 sm:top-6 sm:left-6 z-30 flex flex-col items-start gap-1 drop-shadow-md pointer-events-none">
+                                                {badges.map((badgeText, idx) => (
+                                                    <div 
+                                                        key={idx}
+                                                        className="px-2 sm:px-2.5 py-0.5 bg-gradient-to-r from-[#FFE58F] to-[#D4AF37] text-[#080400] rounded-[3px] font-black font-sans text-[7px] sm:text-[8.5px] tracking-wider uppercase whitespace-nowrap shadow-sm"
+                                                    >
+                                                        {badgeText}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        );
+                                    })()}
+
+                                    {/* Premium Glowing Role Badge (with LH/RH Handedness) - Top Right */}
+                                    <div className="absolute top-5 right-4 sm:top-6 sm:right-6 z-30 flex flex-col items-center gap-1.5 drop-shadow-md">
+                                        <div className="px-2.5 sm:px-3 py-1 bg-gradient-to-r from-[#FFE58F] to-[#D4AF37] text-[#080400] rounded-[4px] font-black font-sans text-[8.5px] sm:text-[10px] tracking-widest uppercase whitespace-nowrap shadow-sm">
+                                            {getRoleDisplayName(currentPlayer.role, currentPlayer)}
                                         </div>
                                         {/* Nationality flag right below it */}
                                         {getFlagUrl(currentPlayer.nationality) && (
@@ -1954,9 +2036,16 @@ const AuctionPodium = () => {
                                                             key={currentBid.amount}
                                                             initial={{ scale: 1.2, opacity: 0 }}
                                                             animate={{ scale: 1, opacity: 1 }}
-                                                            className="text-2xl sm:text-6xl font-black font-serif tracking-tighter text-[#1a1205] drop-shadow-[0_2px_4px_rgba(0,0,0,0.3)] relative z-10"
+                                                            className="flex flex-col items-center justify-center relative z-10 leading-tight"
                                                         >
-                                                            {fmt(currentBid.amount)}
+                                                            <span className="text-2xl sm:text-6xl font-black font-serif tracking-tighter text-[#1a1205] drop-shadow-[0_2px_4px_rgba(0,0,0,0.3)]">
+                                                                {fmtP(currentBid.amount).primary}
+                                                            </span>
+                                                            {fmtP(currentBid.amount).secondary && (
+                                                                <span className="text-[10px] sm:text-base font-black font-sans tracking-wide text-[#1a1205]/80 -mt-0.5 sm:mt-0">
+                                                                    ({fmtP(currentBid.amount).secondary})
+                                                                </span>
+                                                            )}
                                                         </motion.div>
                                                     </div>
                                                 </div>
@@ -1964,8 +2053,15 @@ const AuctionPodium = () => {
                                                 <div className="flex flex-col items-center justify-center p-2 sm:p-6 bg-gradient-to-br from-[#FFE58F] via-[#D4AF37] to-[#996515] shadow-[0_10px_30px_rgba(234,179,8,0.15)] min-w-[130px] sm:min-w-[220px] relative overflow-hidden" style={{ clipPath: 'polygon(12px 0, calc(100% - 12px) 0, 100% 12px, 100% calc(100% - 12px), calc(100% - 12px) 100%, 12px 100%, 0 calc(100% - 12px), 0 12px)' }}>
                                                     <div className="absolute inset-[2px] bg-gradient-to-br from-[#E6B800] to-[#B38000] pointer-events-none z-0" style={{ clipPath: 'polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px), calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px)' }}></div>
                                                     <div className="absolute inset-0 bg-gradient-to-tr from-white/30 to-transparent pointer-events-none z-0"></div>
-                                                    <div className="text-2xl sm:text-6xl font-black font-serif text-[#1a1205] tracking-tighter drop-shadow-[0_1px_1px_rgba(255,255,255,0.5)] relative z-10 leading-none">
-                                                        {fmt(currentPlayer.basePrice)}
+                                                    <div className="flex flex-col items-center justify-center relative z-10 leading-none">
+                                                        <span className="text-2xl sm:text-6xl font-black font-serif text-[#1a1205] tracking-tighter drop-shadow-[0_1px_1px_rgba(255,255,255,0.5)]">
+                                                            {fmtP(currentPlayer.basePrice).primary}
+                                                        </span>
+                                                        {fmtP(currentPlayer.basePrice).secondary && (
+                                                            <span className="text-[10px] sm:text-base font-black font-sans tracking-wide text-[#1a1205]/80 mt-1">
+                                                                ({fmtP(currentPlayer.basePrice).secondary})
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <div className="mt-2 text-[9px] sm:text-xs font-black uppercase tracking-[0.25em] text-[#1a1205]/80 relative z-10">
                                                         Starting Price
@@ -2063,6 +2159,7 @@ const AuctionPodium = () => {
                                                             soldEvent.player?.photoUrl
                                                         }
                                                         currency={gameState?.currency}
+                                                        league={gameState?.league}
                                                     />
                                                 )}
                                             </AnimatePresence>
@@ -2155,14 +2252,26 @@ const AuctionPodium = () => {
                                     <div className="flex flex-col min-w-0 text-left">
                                         <div className="text-[8px] font-black text-[#D4AF37]/60 uppercase tracking-widest leading-none mb-1">Signed As</div>
                                         <div className="text-xs font-black text-[#FFE58F] uppercase truncate leading-none mb-1">{myTeam.teamName}</div>
-                                        <div className="text-[10px] font-bold text-[#FFE58F] leading-none">{fmt(myTeam.currentPurse)}</div>
+                                        <div className="flex items-baseline gap-1 text-[10px] font-bold text-[#FFE58F] leading-none">
+                                            <span>{fmtP(myTeam.currentPurse).primary}</span>
+                                            {fmtP(myTeam.currentPurse).secondary && (
+                                                <span className="text-[8px] font-semibold text-[#FFE58F]/75">({fmtP(myTeam.currentPurse).secondary})</span>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
 
                                 <div className="flex items-center gap-4">
                                     <div className="text-right mr-16 sm:mr-20">
                                         <div className="text-[8px] font-black text-[#D4AF37]/60 uppercase tracking-widest leading-none mb-1">Next Bid</div>
-                                        <div className="text-lg font-black text-[#FFE58F] leading-none">{fmt(targetAmount)}</div>
+                                        <div className="text-base sm:text-lg font-black text-[#FFE58F] leading-tight flex flex-col items-end">
+                                            <span>{fmtP(targetAmount).primary}</span>
+                                            {fmtP(targetAmount).secondary && (
+                                                <span className="text-[9px] font-bold text-[#D4AF37]/80 leading-none mt-0.5">
+                                                    ({fmtP(targetAmount).secondary})
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
                                     {/* Mobile Paddle: Round Logo Badge & Stick */}
                                     <div className="absolute bottom-0 right-2 xs:right-4 flex flex-col items-center justify-end z-30 pointer-events-none">
@@ -2325,7 +2434,12 @@ const AuctionPodium = () => {
                                         <div className="text-xs font-bold text-[#D4AF37]/60 uppercase tracking-[0.15em] mt-1.5 truncate">
                                             {myTeam.ownerName}{" "}
                                             <span className="text-[#D4AF37]/40 px-1">|</span>{" "}
-                                            <span className="text-[#FFE58F]">{fmt(myTeam.currentPurse)}</span>
+                                            <span className="text-[#FFE58F] inline-flex items-baseline gap-1 font-mono">
+                                                <span>{fmtP(myTeam.currentPurse).primary}</span>
+                                                {fmtP(myTeam.currentPurse).secondary && (
+                                                    <span className="text-[10px] text-[#FFE58F]/75 font-sans font-semibold">({fmtP(myTeam.currentPurse).secondary})</span>
+                                                )}
+                                            </span>
                                         </div>
                                     </div>
                                 </div>
@@ -2339,8 +2453,13 @@ const AuctionPodium = () => {
                                         <div className="text-[10px] text-[#2c1d05] font-black uppercase tracking-widest mb-1">
                                             Next Bid
                                         </div>
-                                        <div className="text-4xl font-black font-serif text-[#1a1103] tracking-tighter drop-shadow-[0_1px_1px_rgba(255,255,255,0.4)]">
-                                            {fmt(targetAmount)}
+                                        <div className="text-3xl xl:text-4xl font-black font-serif text-[#1a1103] tracking-tighter drop-shadow-[0_1px_1px_rgba(255,255,255,0.4)] flex flex-col items-end leading-tight">
+                                            <span>{fmtP(targetAmount).primary}</span>
+                                            {fmtP(targetAmount).secondary && (
+                                                <span className="text-xs xl:text-sm font-black font-sans text-[#4a3205]">
+                                                    ({fmtP(targetAmount).secondary})
+                                                </span>
+                                            )}
                                         </div>
                                     </div>
                                     {/* Desktop Paddle: Round Logo Badge & Stick */}

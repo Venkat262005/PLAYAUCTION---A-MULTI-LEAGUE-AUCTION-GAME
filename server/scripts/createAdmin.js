@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const Admin = require('../models/Admin');
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 
 const username = process.argv[2];
 const password = process.argv[3];

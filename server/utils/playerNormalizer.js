@@ -16,6 +16,42 @@ const parseStatStr = (val, fallback = '-') => {
     return String(val).trim();
 };
 
+const formatBattingPosition = (pos) => {
+    if (!pos || String(pos).trim() === '-' || String(pos).trim() === '') return '';
+    const clean = String(pos).trim().toLowerCase();
+    if (clean.includes('top')) return 'Top Order';
+    if (clean.includes('finish')) return 'Finisher';
+    if (clean.includes('middle') && clean.includes('lower')) return 'Middle / Lower Order';
+    if (clean.includes('middle')) return 'Middle Order';
+    if (clean.includes('lower')) return 'Lower Order';
+    return String(pos).trim().replace(/\b\w/g, l => l.toUpperCase());
+};
+
+const formatBowlingType = (type, role, bowlingStyle) => {
+    if (type && String(type).trim() !== '' && String(type).trim() !== '-') {
+        const c = String(type).trim().toLowerCase();
+        if (c.includes('spin') || c.includes('leg') || c.includes('off') || c.includes('orthodox')) return 'Spin';
+        if (c.includes('pace') || c.includes('fast') || c.includes('medium') || c.includes('seam')) return 'Pace';
+        return String(type).trim().replace(/\b\w/g, l => l.toUpperCase());
+    }
+    const combined = `${role || ''} ${bowlingStyle || ''}`.toLowerCase();
+    if (combined.includes('spin') || combined.includes('leg') || combined.includes('orthodox') || combined.includes('googly') || combined.includes('off break')) {
+        return 'Spin';
+    }
+    if (combined.includes('pace') || combined.includes('fast') || combined.includes('medium') || combined.includes('seam')) {
+        return 'Pace';
+    }
+    return '';
+};
+
+const formatBattingStyle = (style) => {
+    if (!style || String(style).trim() === '-' || String(style).trim() === '') return '';
+    const clean = String(style).trim().toLowerCase();
+    if (clean.includes('left')) return 'Left Handed';
+    if (clean.includes('right')) return 'Right Handed';
+    return String(style).trim().replace(/\b\w/g, l => l.toUpperCase());
+};
+
 const getCollectionsForLeague = (league) => {
     const l = String(league).toLowerCase();
     if (l === 'sa20') {
@@ -83,11 +119,36 @@ const normalizePlayer = (p, collName) => {
     // 2. Determine Role
     let role = p.role || p.Role || p.Specialism || 'Batsman';
     const lowerRole = role.toLowerCase();
+    const isBowlerPool = lowerColl.includes('bowler') || lowerColl.includes('bowl');
+    const isAllrounderPool = lowerColl.includes('allrounder') || lowerColl.includes('all_rounder') || lowerColl.includes('all-rounder');
+
     if (lowerRole.includes('keeper') || lowerRole.includes('wk')) {
-        role = 'Wicket Keeper';
+        role = 'Wicketkeeper';
+    } else if (isAllrounderPool) {
+        if (lowerRole.includes('pace') || lowerRole.includes('fast') || lowerRole.includes('medium') || String(p.bowling_style || p['bowling style'] || '').toLowerCase().includes('fast') || String(p.bowling_style || p['bowling style'] || '').toLowerCase().includes('pace')) {
+            role = 'Pace Bowling Allrounder';
+        } else if (lowerRole.includes('spin') || String(p.bowling_style || p['bowling style'] || '').toLowerCase().includes('spin')) {
+            role = 'Spin Bowling Allrounder';
+        } else {
+            role = 'All-Rounder';
+        }
+    } else if (isBowlerPool) {
+        if (lowerRole.includes('spin') || String(p.bowling_style || p['bowling style'] || '').toLowerCase().includes('spin')) {
+            role = 'Spin Bowler';
+        } else {
+            role = 'Pace Bowler';
+        }
+    } else if (lowerRole.includes('spin') && (lowerRole.includes('all') || lowerRole.includes('ar') || lowerRole.includes('rounder'))) {
+        role = 'Spin Bowling Allrounder';
+    } else if ((lowerRole.includes('pace') || lowerRole.includes('fast') || lowerRole.includes('medium')) && (lowerRole.includes('all') || lowerRole.includes('ar') || lowerRole.includes('rounder'))) {
+        role = 'Pace Bowling Allrounder';
     } else if (lowerRole.includes('all') || lowerRole.includes('ar') || lowerRole.includes('rounder')) {
-        role = 'Allrounder';
-    } else if (lowerRole.includes('bowl') || lowerRole.includes('spin') || lowerRole.includes('fast')) {
+        role = 'All-Rounder';
+    } else if (lowerRole.includes('spin') && (lowerRole.includes('bowl') || lowerRole.includes('bw') || lowerRole.includes('spin'))) {
+        role = 'Spin Bowler';
+    } else if ((lowerRole.includes('fast') || lowerRole.includes('pace') || lowerRole.includes('medium')) && (lowerRole.includes('bowl') || lowerRole.includes('bw') || lowerRole.includes('fast') || lowerRole.includes('pace'))) {
+        role = 'Pace Bowler';
+    } else if (lowerRole.includes('bowl') || lowerRole.includes('spin') || lowerRole.includes('fast') || lowerRole.includes('pace')) {
         role = 'Bowler';
     } else {
         role = 'Batsman';
@@ -153,6 +214,16 @@ const normalizePlayer = (p, collName) => {
     const imgUrl = p.image_url || p.image_path || p.imagepath || p.image || fallbackImg || '';
     const cleanImgUrl = (/hscicdn\.com\/image\/upload\/f_auto\/?$/i.test(imgUrl) || imgUrl.length < 45) ? '' : imgUrl;
 
+    const rawBattingPos = p.position || p['batting position'] || p.batting_position || p.battingPosition || '';
+    const rawBattingStyle = p.batting_style || p['batting style'] || p.battingStyle || p['Batting style'] || p['Batting Style'] || '';
+    const rawBowlingStyle = p.bowling_style || p['bowling style'] || p.bowlingStyle || p['Bowling style'] || p['Bowling Style'] || '';
+    const rawBowlingType = p.bowling_type || p['bowling type'] || p.bowlingType || '';
+
+    const battingPosition = formatBattingPosition(rawBattingPos);
+    const bowlingType = formatBowlingType(rawBowlingType, role, rawBowlingStyle);
+    const battingStyle = formatBattingStyle(rawBattingStyle);
+    const bowlingStyle = rawBowlingStyle ? String(rawBowlingStyle).trim() : '';
+
     return {
         ...p,
         _id: String(p._id),
@@ -170,19 +241,24 @@ const normalizePlayer = (p, collName) => {
         age: age > 0 ? age : undefined,
         isU23: !!isU23,
         isUncapped: isSa20 ? !!isUncapped : undefined,
+        position: battingPosition || undefined,
+        batting_position: battingPosition || undefined,
+        bowling_type: bowlingType || undefined,
+        batting_style: battingStyle || undefined,
+        bowling_style: bowlingStyle || undefined,
         // Nest stats for UI and AI compatibility
         stats: {
-            battingAvg: parseStatNum(p.batting_avg || p.battingAvg || p["Batting Avg"]),
-            strikeRate: parseStatNum(p.batting_strike_rate || p.strike_rate || p.strikeRate || p["Strike rate"]),
-            highestScore: parseStatNum(p.highest_score || p.highestScore || p.Hs || p.HS || p["Highest score"]),
-            bowlingAvg: parseStatNum(p.bowling_avg || p.bowlingAvg || p["Bowling avg"]),
-            economy: parseStatNum(p.bowling_economy || p.economy || p["bowling economy"] || p.economyRate),
-            bestFigures: parseStatStr(p.best_bowling_figures || p.bestFigures || p.BF || p["Best Bowling Figures in innings"], '0/0'),
-            matches: parseStatNum(p.matches || p["matches played "] || p.matchesPlayed),
-            runs: parseStatNum(p.runs || p.Runs),
-            wickets: parseStatNum(p.wickets || p.Wickets),
-            catches: parseStatNum(p.catches || p.Catches || p.catches),
-            stumpings: parseStatNum(p.stumpings || p.stumps || p.Stumps || p.Stumping)
+            battingAvg: parseStatNum(p.batting_avg || p.battingAvg || p["Batting Avg"] || p.stats?.battingAvg),
+            strikeRate: parseStatNum(p.batting_strike_rate || p.strike_rate || p.strikeRate || p["Strike rate"] || p.stats?.strikeRate),
+            highestScore: parseStatNum(p.highest_score || p.highestScore || p.Hs || p.HS || p["Highest score"] || p.stats?.highestScore),
+            bowlingAvg: parseStatNum(p.bowling_avg || p.bowlingAvg || p["Bowling avg"] || p.stats?.bowlingAvg),
+            economy: parseStatNum(p.bowling_economy || p.economy || p["bowling economy"] || p.economyRate || p.stats?.economy),
+            bestFigures: parseStatStr(p.best_bowling_figures || p.bestFigures || p.BF || p["Best Bowling Figures in innings"] || p.stats?.bestFigures, '0/0'),
+            matches: parseStatNum(p.matches || p["matches played "] || p.matchesPlayed || p.stats?.matches),
+            runs: parseStatNum(p.runs || p.Runs || p.stats?.runs),
+            wickets: parseStatNum(p.wickets || p.Wickets || p.stats?.wickets),
+            catches: parseStatNum(p.catches || p.Catches || p.catches || p.stats?.catches),
+            stumpings: parseStatNum(p.stumpings || p.stumps || p.Stumps || p.Stumping || p.stats?.stumpings)
         }
     };
 };

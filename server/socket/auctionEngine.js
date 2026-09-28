@@ -1,4 +1,3 @@
-const Room = require('../models/Room');
 const Player = require('../models/Player');
 const { generateQuiz } = require('../services/quizEngine');
 const { buildQuizLeaderboard, getSafeQuizQuestion } = require('../utils/quizHelpers');
@@ -12,6 +11,20 @@ const jwt = require('jsonwebtoken');
 const { markDirty, flushRoom } = require('../services/dbWriter');
 const { getSA20PrevSquads, validateRetentions, calculateRetentionCosts, isUncappedPlayer, TEAM_NAME_MAP } = require('../services/sa20History');
 const { getWPLPrevSquads, validateWPLRetentions, calculateWPLRetentionCosts, isWPLUncappedPlayer, WPL_TEAM_NAME_MAP } = require('../services/wplHistory');
+
+const IPL_TEAM_NAME_MAP = {
+    'Mumbai Indians': 'MI',
+    'Chennai Super Kings': 'CSK',
+    'Royal Challengers Bengaluru': 'RCB',
+    'Royal Challengers Bangalore': 'RCB',
+    'Kolkata Knight Riders': 'KKR',
+    'Delhi Capitals': 'DC',
+    'Punjab Kings': 'PBKS',
+    'Rajasthan Royals': 'RR',
+    'Sunrisers Hyderabad': 'SRH',
+    'Lucknow Super Giants': 'LSG',
+    'Gujarat Titans': 'GT'
+};
 
 const JWT_SECRET = process.env.JWT_SECRET || 'ipl_auction_fallback_secret';
 
@@ -108,15 +121,26 @@ async function fetchAllPlayers(league = 'ipl') {
 async function findPlayerById(playerId, league = 'ipl') {
     if (!playerId) return null;
     const { ObjectId } = require('mongoose').Types;
-    let oid;
-    try { oid = new ObjectId(String(playerId)); } catch { return null; }
+
+    const idStr = String(playerId);
+    const query = { $or: [{ _id: idStr }, { _id: playerId }] };
+    const num = Number(playerId);
+    if (!Number.isNaN(num)) query.$or.push({ _id: num });
+    if (ObjectId.isValid(idStr)) query.$or.push({ _id: new ObjectId(idStr) });
 
     const collections = getCollectionsForLeague(league);
     for (const collName of collections) {
         const dbName = league === 'sa20' ? 'SA20' : league;
         const db = mongoose.connection.client.db(dbName);
-        const doc = await db.collection(collName).findOne({ _id: oid });
-        if (doc) return doc;
+        const doc = await db.collection(collName).findOne(query);
+        if (doc) {
+            return {
+                ...doc,
+                poolName: doc.poolName || collName.replace(/_/g, ' ').toUpperCase(),
+                poolID: doc.poolID || collName,
+                collectionName: collName
+            };
+        }
     }
     return null;
 }
@@ -292,12 +316,19 @@ function getRetentionHelpers(league) {
             calculateFn:    calculateWPLRetentionCosts,
             isUncappedFn:   isWPLUncappedPlayer,
         };
-    } else { // sa20
+    } else if (league === 'sa20') {
         return {
             getPrevSquads:  getSA20PrevSquads,
             validateFn:     validateRetentions,
             calculateFn:    calculateRetentionCosts,
             isUncappedFn:   isUncappedPlayer,
+        };
+    } else { // ipl fallback stubs
+        return {
+            getPrevSquads:  () => null,
+            validateFn:     async () => ({ valid: true, errors: [] }),
+            calculateFn:    () => ({}),
+            isUncappedFn:   () => false,
         };
     }
 }
@@ -515,6 +546,12 @@ async function loadFranchises(targetLeague) {
             if (logoUrl.startsWith('/logos/')) {
                 logoUrl = logoUrl.replace('/logos/', '/ipl_logos/');
             }
+            // Map logo to local relative asset path to avoid hotlinking errors in production
+            const fallbacks = targetLeague === 'sa20' ? SA20_TEAMS : (targetLeague === 'wpl' ? WPL_TEAMS : IPL_TEAMS);
+            const foundFallback = fallbacks.find(t => t.id === f.shortName);
+            if (foundFallback && foundFallback.logoUrl) {
+                logoUrl = foundFallback.logoUrl;
+            }
             return {
                 _id: f._id,
                 name: f.name,
@@ -600,13 +637,10 @@ async function rehydrateRoomState(roomCode) {
 
         // Map team logos for existing teams to ensure correct path
         const mappedTeams = (roomDoc.teams || []).map(t => {
-            let logo = t.teamLogo || t.logoUrl || '';
-            if (logo.startsWith('/logos/')) {
-                logo = logo.replace('/logos/', '/ipl_logos/');
-            }
+            const match = normalizedFranchises.find(f => f.name === t.teamName);
             return {
                 ...t,
-                teamLogo: logo
+                teamLogo: match ? match.logoUrl : t.teamLogo
             };
         });
 
@@ -771,7 +805,11 @@ async function handleAuctionEndTransition(roomCode, io) {
     // [NEW] AI Mode Bypass: Skip interest voting and re-auction rounds
     if (state.isAiMode) {
         console.log(`[AI-MODE] Skipping interest voting/re-auction for room ${roomCode}. Moving to finalization.`);
-        finalizeResults(roomCode, io);
+        if (state.league === 'sa20') {
+            startWildcardPhase(roomCode, io);
+        } else {
+            finalizeResults(roomCode, io);
+        }
         return;
     }
 
@@ -782,14 +820,18 @@ async function handleAuctionEndTransition(roomCode, io) {
         ? Math.min(...remainingPlayers.map(p => p.basePrice || 20)) 
         : 20;
 
-    const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
+    const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 20 : 25);
     const allExhausted = state.teams.length > 0 && state.teams.every(t => {
         return t.playersAcquired.length >= maxSquad || t.currentPurse < lowestRemainingPrice;
     });
 
     if (allExhausted) {
         console.log(`[TRANSITION] All teams exhausted in room ${roomCode}. Skipping voting/re-auction.`);
-        finalizeResults(roomCode, io);
+        if (state.league === 'sa20') {
+            startWildcardPhase(roomCode, io);
+        } else {
+            finalizeResults(roomCode, io);
+        }
         return;
     }
 
@@ -870,7 +912,11 @@ async function handleAuctionEndTransition(roomCode, io) {
                     io.to(roomCode).emit('auction_resumed', { state: refreshedState });
                     loadNextPlayer(roomCode, io);
                 } else {
-                    finalizeResults(roomCode, io);
+                    if (refreshedState && refreshedState.league === 'sa20') {
+                        startWildcardPhase(roomCode, io);
+                    } else {
+                        finalizeResults(roomCode, io);
+                    }
                 }
             }, 5000);
             return;
@@ -878,7 +924,11 @@ async function handleAuctionEndTransition(roomCode, io) {
     }
 
     // Phase 3: Finalization
-    finalizeResults(roomCode, io);
+    if (state.league === 'sa20') {
+        startWildcardPhase(roomCode, io);
+    } else {
+        finalizeResults(roomCode, io);
+    }
 }
 
 /**
@@ -915,7 +965,11 @@ function finalizeManualEnd(roomCode, io) {
 
     // Move to finalization phase directly
     setTimeout(() => {
-        finalizeResults(roomCode, io);
+        if (state.league === 'sa20') {
+            startWildcardPhase(roomCode, io);
+        } else {
+            finalizeResults(roomCode, io);
+        }
     }, 2000);
 }
 
@@ -929,7 +983,9 @@ async function runTeamAiEvaluation(state) {
         const richPlayers = await Promise.all(playersAcquired.map(async (p) => {
             const data = await findPlayerById(p.player, state.league || 'ipl');
             const nat = (data?.nationality || "").toLowerCase().trim();
-            const isOverseas = Boolean(nat && !["india", "indian", "ind"].includes(nat));
+            const isOverseas = state.league === 'sa20'
+                ? Boolean(nat && !["south africa", "south african", "rsa", "sa"].includes(nat))
+                : Boolean(nat && !["india", "indian", "ind"].includes(nat));
 
             const age = Number(data?.age || data?.Age || p.age || p.Age || 0);
             const isU23Val = state.league !== 'sa20' && (
@@ -938,18 +994,42 @@ async function runTeamAiEvaluation(state) {
                 String(data?.poolID || data?.poolName || p.poolID || p.poolName || '').toLowerCase().includes('rookie')
             );
 
+            const poolStr = String(data?.poolName || data?.poolID || data?.collectionName || p.poolName || p.poolID || '').toLowerCase();
+            let resolvedRole = data?.role || p.role;
+
+            // Pool-based classification rule:
+            // "add pace bowler as bowler if he is from bowlers pools if he is from all rounder pool consider him as allrounder with pace"
+            if (poolStr.includes('allrounder') || poolStr.includes('all_rounder') || poolStr.includes('all-rounder') || poolStr.includes('all rounder')) {
+                const lowerR = String(resolvedRole || '').toLowerCase();
+                if (lowerR.includes('pace') || lowerR.includes('fast') || lowerR.includes('medium') || String(data?.bowling_style || '').toLowerCase().includes('fast') || String(data?.bowling_style || '').toLowerCase().includes('pace')) {
+                    resolvedRole = 'Pace Bowling Allrounder';
+                } else if (lowerR.includes('spin')) {
+                    resolvedRole = 'Spin Bowling Allrounder';
+                } else {
+                    resolvedRole = 'All-Rounder';
+                }
+            } else if (poolStr.includes('bowler') || poolStr.includes('bowl')) {
+                const lowerR = String(resolvedRole || '').toLowerCase();
+                if (lowerR.includes('spin')) {
+                    resolvedRole = 'spin bowler';
+                } else {
+                    resolvedRole = 'Pace Bowler';
+                }
+            }
+
             const merged = {
                 ...p,
                 ...data,
                 name: data?.player || data?.name || p.name,
-                poolID: data?.poolID || p.poolID,
-                poolName: data?.poolName || p.poolName,
+                role: resolvedRole,
+                poolID: data?.poolID || p.poolID || data?.collectionName,
+                poolName: data?.poolName || p.poolName || data?.collectionName,
             };
 
             return {
                 player: p.player,
                 name: merged.name,
-                role: data?.role,
+                role: resolvedRole,
                 nationality: data?.nationality,
                 image_path: data?.image_path || data?.imagepath || data?.photoUrl,
                 isOverseas: isOverseas,
@@ -966,41 +1046,181 @@ async function runTeamAiEvaluation(state) {
         state.teams[index].playersAcquired = richPlayers;
     }));
 
-    const minSquadSize = state.league === 'wpl' ? 15 : (state.league === 'sa20' ? 17 : 15);
+    const isPureBowler = (playerOrRole, optionalPool) => {
+        let role = '';
+        let pool = '';
 
-    const qualifiedTeams = state.teams.filter(t => {
-        const size = t.playersAcquired?.length || 0;
-        if (size < minSquadSize) return false;
-        if (state.league === 'sa20') {
-            const uncappedCount = (t.playersAcquired || []).filter(p => isSa20UncappedAcquired(p)).length;
-            if (uncappedCount < 2) return false;
+        if (typeof playerOrRole === 'object' && playerOrRole !== null) {
+            role = String(playerOrRole.role || '').toLowerCase().trim();
+            pool = String(playerOrRole.poolName || playerOrRole.poolID || playerOrRole.collectionName || '').toLowerCase().trim();
+        } else {
+            role = String(playerOrRole || '').toLowerCase().trim();
+            pool = String(optionalPool || '').toLowerCase().trim();
         }
-        return true;
-    });
 
+        if (!role && !pool) return false;
+
+        // If from an all-rounder pool -> considered an allrounder with pace/spin, NOT a pure bowler
+        if (pool.includes('allrounder') || pool.includes('all_rounder') || pool.includes('all-rounder') || pool.includes('all rounder')) {
+            return false;
+        }
+
+        // If from a bowlers pool -> considered a pure bowler
+        if (pool.includes('bowler') || pool.includes('bowl')) {
+            return true;
+        }
+
+        // Fallback: check role string
+        if (role.includes('allrounder') || role.includes('all-rounder') || role.includes('all rounder')) {
+            return false;
+        }
+
+        return role.includes('bowler') || role.includes('bowl') || role.includes('pace') || role.includes('fast') || role.includes('spin');
+    };
+
+    const isWicketkeeper = (role) => {
+        const r = String(role || '').toLowerCase();
+        return r === 'wicketkeeper' || r === 'wicket keeper' || r.includes('keeper') || r.includes('wk');
+    };
+
+    const isOverseasPlayer = (p) => {
+        return !!p.isOverseas || !!p.overseas;
+    };
+
+    const validateSquad = (t, league) => {
+        const players = t.playersAcquired || [];
+        const size = players.length;
+        const bowlerCount = players.filter(p => isPureBowler(p, p.poolName || p.poolID || p.collectionName)).length;
+        const wkCount = players.filter(p => isWicketkeeper(p.role)).length;
+        const overseasCount = players.filter(isOverseasPlayer).length;
+
+        if (league === 'ipl') {
+            if (size < 18) {
+                return {
+                    valid: false,
+                    reason: "DISQUALIFIED: IPL Squad size requirement (min 18 players) not met.",
+                    fixMessage: "Recruit more players to meet the minimum squad size of 18."
+                };
+            }
+            if (overseasCount > 8) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: IPL Overseas Players limit (max 8, found ${overseasCount}) exceeded.`,
+                    fixMessage: "Ensure your squad has at most 8 overseas players."
+                };
+            }
+            if (bowlerCount < 5) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: IPL Pure Bowlers requirement (min 5, found ${bowlerCount}) not met.`,
+                    fixMessage: "Ensure you draft and include at least 5 pure bowlers in your squad."
+                };
+            }
+            if (wkCount < 2) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: IPL Wicketkeepers requirement (min 2, found ${wkCount}) not met.`,
+                    fixMessage: "Ensure you draft and include at least 2 wicketkeepers in your squad."
+                };
+            }
+        } else if (league === 'wpl') {
+            if (size < 15) {
+                return {
+                    valid: false,
+                    reason: "DISQUALIFIED: WPL Squad size requirement (min 15 players) not met.",
+                    fixMessage: "Recruit more players to meet the minimum squad size of 15."
+                };
+            }
+            if (overseasCount > 8) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: WPL Overseas Players limit (max 8, found ${overseasCount}) exceeded.`,
+                    fixMessage: "Ensure your squad has at most 8 overseas players."
+                };
+            }
+            if (bowlerCount < 4) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: WPL Pure Bowlers requirement (min 4, found ${bowlerCount}) not met.`,
+                    fixMessage: "Ensure you draft and include at least 4 pure bowlers in your squad."
+                };
+            }
+            if (wkCount < 2) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: WPL Wicketkeepers requirement (min 2, found ${wkCount}) not met.`,
+                    fixMessage: "Ensure you draft and include at least 2 wicketkeepers in your squad."
+                };
+            }
+        } else if (league === 'sa20') {
+            if (size < 15) {
+                return {
+                    valid: false,
+                    reason: "DISQUALIFIED: SA20 Squad size requirement (min 15 players) not met.",
+                    fixMessage: "Recruit more players to meet the minimum squad size of 15."
+                };
+            }
+            const saPlayersCount = players.filter(p => !isOverseasPlayer(p)).length;
+            if (saPlayersCount < 10) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: SA20 South African Players requirement (min 10, found ${saPlayersCount}) not met.`,
+                    fixMessage: "Ensure you draft and include at least 10 South African players in your squad."
+                };
+            }
+            if (overseasCount > 7) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: SA20 International Players limit (max 7, found ${overseasCount}) exceeded.`,
+                    fixMessage: "Ensure your squad has at most 7 overseas players."
+                };
+            }
+            const uncappedCount = players.filter(p => isSa20UncappedAcquired(p)).length;
+            if (uncappedCount < 2) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: SA20 Domestic Uncapped Players requirement (min 2, found ${uncappedCount}) not met.`,
+                    fixMessage: "Ensure you draft and include at least 2 domestic uncapped players in your squad."
+                };
+            }
+            if (wkCount < 2) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: SA20 Wicketkeepers requirement (min 2, found ${wkCount}) not met.`,
+                    fixMessage: "Ensure you draft and include at least 2 wicketkeepers in your squad."
+                };
+            }
+            if (bowlerCount < 3) {
+                return {
+                    valid: false,
+                    reason: `DISQUALIFIED: SA20 Pure Bowlers requirement (min 3, found ${bowlerCount}) not met.`,
+                    fixMessage: "Ensure you draft and include at least 3 pure bowlers in your squad."
+                };
+            }
+        }
+        return { valid: true };
+    };
+
+    const qualifiedTeams = state.teams.filter(t => validateSquad(t, state.league).valid);
     const disqualifiedTeams = state.teams.filter(t => !qualifiedTeams.includes(t));
 
     disqualifiedTeams.forEach(t => {
         const idx = state.teams.findIndex(st => st.teamName === t.teamName);
-        const size = t.playersAcquired?.length || 0;
-
-        let reason = `DISQUALIFIED: Squad size requirement (min ${minSquadSize}) not met.`;
-        let fixMessage = `Recruit more players to meet the minimum squad size of ${minSquadSize}.`;
-
-        if (state.league === 'sa20') {
-            const uncappedCount = (t.playersAcquired || []).filter(p => isSa20UncappedAcquired(p)).length;
-            if (size < 17) {
-                reason = "DISQUALIFIED: SA20 Squad size requirement (min 17 players) not met.";
-            } else if (uncappedCount < 2) {
-                reason = `DISQUALIFIED: SA20 Squad uncapped requirement (min 2 players, found ${uncappedCount}) not met.`;
-                fixMessage = "Ensure you draft and include at least 2 uncapped (domestic) players in your squad.";
-            }
-        }
+        const validationResult = validateSquad(t, state.league);
+        const reason = validationResult.reason || "DISQUALIFIED: Squad fails roster eligibility rules.";
+        const fixMessage = validationResult.fixMessage || "Ensure squad matches league roster constraints.";
 
         state.teams[idx].evaluation = {
             score: 0,
             overallScore: 0,
+            rating: 0,
+            auctionGrade: "D",
             titleProbability: "Weak",
+            disqualificationReason: reason,
+            summary: `${reason} ${fixMessage}`,
+            broad_summary: `${reason} ${fixMessage}`,
+            weaknesses: [reason, fixMessage],
+            strengths: ["Roster rules violation - not eligible for championship ranking"],
             analysis: {
                 batting_narrative: reason,
                 bowling_narrative: "Squad has failed key roster eligibility rules.",
@@ -1016,9 +1236,10 @@ async function runTeamAiEvaluation(state) {
         evaluatedResults = await evaluateAllTeams(qualifiedTeams.map(t => ({
             teamId: t.teamName,
             teamName: t.teamName,
+            league: state.league,
             playersAcquired: t.playersAcquired,
             currentPurse: t.currentPurse
-        })));
+        })), state.league);
     }
 
     state.teams.forEach((t, idx) => {
@@ -1035,6 +1256,24 @@ async function runTeamAiEvaluation(state) {
                 state.teams[idx].impactPlayers = res.bestXI.impactPlayers.map(name => findId(name)).filter(id => id);
             }
         }
+    });
+
+    // Ensure unique overallScores and ratings for all teams (no ties)
+    const activeEvaluations = state.teams.filter(t => t.evaluation && t.evaluation.overallScore != null);
+    // Sort active evaluations descending by overallScore to determine priority
+    activeEvaluations.sort((a, b) => (b.evaluation.overallScore || 0) - (a.evaluation.overallScore || 0));
+    
+    const usedScores = new Set();
+    activeEvaluations.forEach(t => {
+        let score = t.evaluation.overallScore || 0;
+        // If score is already used, decrement it until it's unique
+        while (usedScores.has(score)) {
+            score -= 1;
+        }
+        if (score < 0) score = 0; // Guard against negative scores
+        usedScores.add(score);
+        t.evaluation.overallScore = score;
+        t.evaluation.rating = score;
     });
 }
 
@@ -1135,8 +1374,19 @@ async function finalizeResults(roomCode, io) {
         senderName: 'System',
         senderTeam: 'System',
         senderColor: '#ef4444',
-        message: "Auction closed! Trivia showdown starting — then AI squad analysis.",
+        message: "Auction closed! AI squad analysis has started in the background while we play Trivia!",
         timestamp: new Date().toLocaleTimeString()
+    });
+
+    // ── TRIGGER EVALUATION IN BACKGROUND ──────────────────────────────────
+    console.log(`[EVAL-BACKGROUND] Starting AI evaluation for room ${roomCode} in the background...`);
+    let isEvalComplete = false;
+    const evalPromise = runTeamAiEvaluation(state).then(() => {
+        isEvalComplete = true;
+        console.log(`[EVAL-BACKGROUND] AI evaluation completed successfully in background for room ${roomCode}.`);
+    }).catch(err => {
+        console.error(`[EVAL-BACKGROUND] Error:`, err);
+        isEvalComplete = true; // Mark complete to avoid hanging
     });
 
     // ── PHASE 1: QUIZ (dedicated page) ─────────────────────────────────────
@@ -1160,25 +1410,60 @@ async function finalizeResults(roomCode, io) {
     await runQuizPhase(roomCode, io, state);
     console.log(`[QUIZ] Phase ended for room ${roomCode}`);
 
+    // If the evaluation is already finished, skip evaluating phase entirely
+    if (isEvalComplete) {
+        console.log(`[EVAL-TIMER] AI evaluation already completed during quiz! Skipping lobby and displaying results immediately.`);
+        try {
+            state.status = 'Finished';
+            const finalizedTeams = [...state.teams];
+
+            finalizedTeams.sort((a, b) => (b.evaluation?.overallScore || 0) - (a.evaluation?.overallScore || 0));
+            state.teams = finalizedTeams.map((t, i) => ({ ...t, rank: i + 1 }));
+
+            const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+            await CompletedRoom.create({
+                roomCode,
+                summary: {
+                    totalPlayers: state.players.length,
+                    soldPlayers: state.teams.reduce((acc, t) => acc + (t.playersAcquired?.length || 0), 0)
+                },
+                results: state.teams.flatMap(t => (t.playersAcquired || []).map(p => ({
+                    playerName: p.name,
+                    soldTo: t.teamName,
+                    amount: p.boughtFor
+                }))),
+                expiresAt: expiresAt
+            });
+
+            await AuctionRoom.findOneAndUpdate(
+                { roomId: roomCode },
+                {
+                    $set: {
+                        status: 'Finished',
+                        franchisesInRoom: state.teams,
+                        quizLeaderboard: state.quizLeaderboard || [],
+                    }
+                }
+            );
+
+            await ActiveRoom.deleteOne({ roomCode });
+
+            console.log(`--- AUCTION FINISHED AND PERSISTED FOR ROOM ${roomCode} ---`);
+            io.to(roomCode).emit('auction_finished', {
+                teams: state.teams,
+                quizLeaderboard: state.quizLeaderboard || [],
+            });
+            return;
+        } catch (err) {
+            console.error("Critical Error in finalizeResults (fast-path):", err);
+            io.to(roomCode).emit('error', 'Failed to generate final results');
+            return;
+        }
+    }
+
     // ── PHASE 2: AI EVALUATION LOBBY ─────────────────────────────────────
     state.status = 'Evaluating';
-    const EVAL_DURATION = 90;
-    state.evaluationTimer = EVAL_DURATION;
-    state.evaluationTimerEndsAt = Date.now() + (EVAL_DURATION * 1000);
-
-    io.to(roomCode).emit('evaluation_started', { timer: EVAL_DURATION });
-    console.log(`[EVAL-TIMER] Evaluation lobby started for room ${roomCode} (${EVAL_DURATION}s)`);
-
-    let evalDisplayTimer = EVAL_DURATION;
-    const evalTimerInterval = setInterval(() => {
-        const remaining = Math.max(0, Math.ceil((state.evaluationTimerEndsAt - Date.now()) / 1000));
-        if (evalDisplayTimer !== remaining) {
-            evalDisplayTimer = remaining;
-            io.to(roomCode).emit('evaluation_timer_tick', { timer: remaining });
-        }
-        if (remaining <= 0) clearInterval(evalTimerInterval);
-    }, 500);
-
+    
     try {
         io.to(roomCode).emit('receive_chat_message', {
             id: Date.now(),
@@ -1188,14 +1473,12 @@ async function finalizeResults(roomCode, io) {
             message: "Crunching numbers... Final team evaluations and rankings incoming!",
             timestamp: new Date().toLocaleTimeString()
         });
-
-        await runTeamAiEvaluation(state);
-
-        const timeToWaitMs = state.evaluationTimerEndsAt - Date.now();
-        if (timeToWaitMs > 0) {
-            console.log(`[EVAL-TIMER] AI completed early. Waiting ${Math.ceil(timeToWaitMs / 1000)}s...`);
-            await new Promise((resolve) => setTimeout(resolve, timeToWaitMs));
-        }
+        
+        io.to(roomCode).emit('evaluation_started', { timer: 90 }); // Default to 90s to match UI log points
+        
+        console.log(`[EVAL-TIMER] Awaiting background AI evaluation for room ${roomCode}...`);
+        await evalPromise;
+        console.log(`[EVAL-TIMER] AI evaluation completed! Proceeding to final results.`);
 
         state.status = 'Finished';
         const finalizedTeams = [...state.teams];
@@ -1242,7 +1525,6 @@ async function finalizeResults(roomCode, io) {
         io.to(roomCode).emit('error', 'Failed to generate final results');
     }
 
-    clearInterval(evalTimerInterval);
     if (roomTimers[roomCode]) {
         clearInterval(roomTimers[roomCode]);
         delete roomTimers[roomCode];
@@ -1631,6 +1913,34 @@ const setupSocketHandlers = (io) => {
                     unsoldHistory: state.unsoldHistory || []
                 };
 
+                if (stateSummary.quiz) {
+                    stateSummary.quiz = {
+                        ...stateSummary.quiz,
+                        questionTimerInterval: undefined,
+                        questionResolver: undefined,
+                        currentQuestionAnsweredBy: stateSummary.quiz.currentQuestionAnsweredBy ? Array.from(stateSummary.quiz.currentQuestionAnsweredBy) : []
+                    };
+                }
+
+                if (state.status === 'Wildcard') {
+                    const acquiredPlayerIds = new Set(
+                        state.teams.flatMap(t => (t.playersAcquired || []).map(p => String(p._id || p.playerId)))
+                    );
+                    const unsoldPlayers = state.players.filter(p => !acquiredPlayerIds.has(String(p._id || p.playerId)));
+                    stateSummary.wildcardUnsoldPlayers = unsoldPlayers.map(p => ({
+                        _id: p._id,
+                        playerId: p.playerId || String(p._id),
+                        name: p.name || p.player,
+                        player: p.name || p.player,
+                        role: p.role,
+                        nationality: p.nationality || 'Unknown',
+                        isOverseas: p.isOverseas || false,
+                        basePrice: p.basePrice || p.base_price || 50,
+                        photoUrl: p.photoUrl || p.imagepath || p.image_path || '',
+                        points: p.points || 0
+                    }));
+                }
+
                 socket.emit('room_joined', { roomCode, state: stateSummary });
                 io.to(roomCode).emit('spectator_update', { spectators: state.spectators || [] });
 
@@ -1690,6 +2000,13 @@ const setupSocketHandlers = (io) => {
                 if (state.status === 'Evaluating') {
                     const remaining = Math.max(0, Math.ceil((state.evaluationTimerEndsAt - Date.now()) / 1000));
                     socket.emit('evaluation_started', { timer: remaining || 90 });
+                }
+
+                if (state.status === 'Finished') {
+                    socket.emit('auction_finished', {
+                        teams: state.teams,
+                        quizLeaderboard: state.quizLeaderboard || [],
+                    });
                 }
 
                 // Broadcast current online map (team owners + spectators) using stable userId
@@ -1957,9 +2274,9 @@ const setupSocketHandlers = (io) => {
             if (!state) return;
             if (!isModerator(state, socket.id, socket.userId)) return socket.emit('error', 'Only host or co-host can start');
 
-            // Prevent starting auction when nobody has claimed a franchise
-            if (!state.teams || state.teams.length === 0) {
-                return socket.emit('error', 'At least one team must claim a franchise before auction can begin');
+            // Prevent starting auction when fewer than 3 teams have claimed franchises
+            if (!state.teams || state.teams.length < 3) {
+                return socket.emit('error', 'At least 3 teams must claim franchises before the auction can begin');
             }
 
             // ── All-league retention: Apply retained players before starting ───────
@@ -2081,8 +2398,8 @@ const setupSocketHandlers = (io) => {
             if (amount < requiredBid) return socket.emit('error', `Minimum bid is ${requiredBid}L`);
             if (bidAmount < requiredBid) return socket.emit('error', `Minimum bid is ${requiredBid}L`);
             if (amount > team.currentPurse) return socket.emit('error', 'Insufficient purse limit');
-            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
-            const maxOverseas = state.league === 'wpl' ? 6 : (state.league === 'sa20' ? 7 : 8);
+            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 20 : 25);
+            const maxOverseas = state.league === 'wpl' ? 8 : (state.league === 'sa20' ? 7 : 8);
             if (team.playersAcquired.length >= maxSquad) return socket.emit('error', `Squad limit reached (Max ${maxSquad})`);
 
             // 1.1 Overseas Limit Check
@@ -2590,6 +2907,178 @@ const setupSocketHandlers = (io) => {
             io.to(roomCode).emit('auction_end_cancelled'); // Hide modal for all clients
         });
 
+        // SA20 Wildcard picks
+        socket.on('pick_wildcard_player', ({ roomCode, playerId, teamName }) => {
+            const state = roomStates[roomCode];
+            if (!state || state.status !== 'Wildcard') return;
+
+            // Validate that this socket represents the team owner, or co-host/host
+            const team = state.teams.find(t => t.teamName === teamName);
+            if (!team) return socket.emit('error', 'Team not found.');
+
+            const isOwner = team.ownerUserId === socket.userId || team.ownerSocketId === socket.id;
+            const mod = isModerator(state, socket.id, socket.userId);
+            if (!isOwner && !mod) {
+                return socket.emit('error', 'You are not authorized to pick a wildcard for this team.');
+            }
+
+            // Check if team already made a choice
+            if (state.wildcardPicks[teamName] || state.wildcardSkips[teamName]) {
+                return socket.emit('error', 'This team has already made a wildcard selection decision.');
+            }
+
+            // Check squad limit (SA20 final squad size max 20)
+            const maxSquad = 20;
+            const currentSquadSize = team.playersAcquired?.length || 0;
+            if (currentSquadSize >= maxSquad) {
+                return socket.emit('error', `Squad is already full (Max ${maxSquad} players).`);
+            }
+
+            // Find the player in unsold list
+            const acquiredPlayerIds = new Set(
+                state.teams.flatMap(t => (t.playersAcquired || []).map(p => String(p._id || p.playerId)))
+            );
+            const unsoldPlayers = state.players.filter(p => !acquiredPlayerIds.has(String(p._id || p.playerId)));
+            const player = unsoldPlayers.find(p => String(p._id) === String(playerId));
+
+            if (!player) {
+                return socket.emit('error', 'Selected player is not available in the unsold wildcard pool.');
+            }
+
+            const price = player.basePrice || player.base_price || 50;
+            if (team.currentPurse < price) {
+                return socket.emit('error', `Insufficient purse (Needs R${price}L, remaining R${team.currentPurse}L).`);
+            }
+
+            // Perform the acquisition
+            team.currentPurse -= price;
+            if (!team.playersAcquired) team.playersAcquired = [];
+            team.playersAcquired.push({
+                _id: player._id,
+                playerId: player.playerId || String(player._id),
+                name: player.name || player.player,
+                player: player.name || player.player,
+                role: player.role,
+                nationality: player.nationality || 'Unknown',
+                isOverseas: player.isOverseas || false,
+                boughtFor: price,
+                basePrice: price,
+                photoUrl: player.photoUrl || player.imagepath || player.image_path || '',
+                points: player.points || 0,
+                position: player.position || player.batting_position || player['batting position'],
+                batting_position: player.batting_position || player.position || player['batting position'],
+                bowling_type: player.bowling_type || player['bowling type'],
+                batting_style: player.batting_style || player['batting style'],
+                bowling_style: player.bowling_style || player['bowling style'],
+                isWildcard: true
+            });
+
+            state.wildcardPicks[teamName] = player._id;
+
+            io.to(roomCode).emit('receive_chat_message', {
+                id: Date.now(),
+                senderName: 'System',
+                senderTeam: 'System',
+                senderColor: '#10b981',
+                message: `${teamName} selected Wildcard player: ${player.name || player.player} for R${price}L.`,
+                timestamp: new Date().toLocaleTimeString()
+            });
+
+            // Re-calculate unsold players list
+            const newAcquiredIds = new Set(
+                state.teams.flatMap(t => (t.playersAcquired || []).map(p => String(p._id || p.playerId)))
+            );
+            const remainingUnsold = state.players.filter(p => !newAcquiredIds.has(String(p._id || p.playerId)));
+
+            io.to(roomCode).emit('wildcard_state_updated', {
+                unsoldPlayers: remainingUnsold.map(p => ({
+                    _id: p._id,
+                    playerId: p.playerId || String(p._id),
+                    name: p.name || p.player,
+                    player: p.name || p.player,
+                    role: p.role,
+                    nationality: p.nationality || 'Unknown',
+                    isOverseas: p.isOverseas || false,
+                    basePrice: p.basePrice || p.base_price || 50,
+                    photoUrl: p.photoUrl || p.imagepath || p.image_path || '',
+                    points: p.points || 0
+                })),
+                picks: state.wildcardPicks,
+                skips: state.wildcardSkips,
+                teams: state.teams
+            });
+
+            persistActiveState(roomCode);
+            checkWildcardPhaseCompletion(roomCode, io);
+        });
+
+        socket.on('skip_wildcard', ({ roomCode, teamName }) => {
+            const state = roomStates[roomCode];
+            if (!state || state.status !== 'Wildcard') return;
+
+            // Validate that this socket represents the team owner, or co-host/host
+            const team = state.teams.find(t => t.teamName === teamName);
+            if (!team) return socket.emit('error', 'Team not found.');
+
+            const isOwner = team.ownerUserId === socket.userId || team.ownerSocketId === socket.id;
+            const mod = isModerator(state, socket.id, socket.userId);
+            if (!isOwner && !mod) {
+                return socket.emit('error', 'You are not authorized to skip wildcard for this team.');
+            }
+
+            if (state.wildcardPicks[teamName] || state.wildcardSkips[teamName]) {
+                return socket.emit('error', 'This team has already made a wildcard selection decision.');
+            }
+
+            state.wildcardSkips[teamName] = true;
+
+            io.to(roomCode).emit('receive_chat_message', {
+                id: Date.now(),
+                senderName: 'System',
+                senderTeam: 'System',
+                senderColor: '#ef4444',
+                message: `${teamName} skipped their Wildcard selection.`,
+                timestamp: new Date().toLocaleTimeString()
+            });
+
+            // Re-calculate unsold players list
+            const acquiredPlayerIds = new Set(
+                state.teams.flatMap(t => (t.playersAcquired || []).map(p => String(p._id || p.playerId)))
+            );
+            const unsoldPlayers = state.players.filter(p => !acquiredPlayerIds.has(String(p._id || p.playerId)));
+
+            io.to(roomCode).emit('wildcard_state_updated', {
+                unsoldPlayers: unsoldPlayers.map(p => ({
+                    _id: p._id,
+                    playerId: p.playerId || String(p._id),
+                    name: p.name || p.player,
+                    player: p.name || p.player,
+                    role: p.role,
+                    nationality: p.nationality || 'Unknown',
+                    isOverseas: p.isOverseas || false,
+                    basePrice: p.basePrice || p.base_price || 50,
+                    photoUrl: p.photoUrl || p.imagepath || p.image_path || '',
+                    points: p.points || 0
+                })),
+                picks: state.wildcardPicks,
+                skips: state.wildcardSkips,
+                teams: state.teams
+            });
+
+            persistActiveState(roomCode);
+            checkWildcardPhaseCompletion(roomCode, io);
+        });
+
+        socket.on('complete_wildcard_phase', ({ roomCode }) => {
+            const state = roomStates[roomCode];
+            const mod = isModerator(state, socket.id, socket.userId);
+            if (!state || !mod) return socket.emit('error', 'Only host/co-hosts can complete the wildcard phase.');
+
+            console.log(`[WILDCARD] Host forced completion of wildcard phase in room ${roomCode}. Moving to finalization.`);
+            state.wildcardPhaseCompleted = true;
+            finalizeResults(roomCode, io);
+        });
+
         // Update Room Settings (Host Only)
         socket.on('update_settings', ({ roomCode, timerDuration }) => {
             const state = roomStates[roomCode];
@@ -2947,7 +3436,7 @@ function loadNextPlayer(roomCode, io) {
         return bp < min ? bp : min;
     }, Infinity);
 
-    const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
+    const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 20 : 25);
     const allTeamsExhausted = state.teams.length > 0 && state.teams.every(t => {
         const isFull = (t.playersAcquired?.length || 0) >= maxSquad;
         const cantAfford = t.currentPurse < 30; // Min bidding threshold requested by user
@@ -3086,6 +3575,98 @@ function getBotValuation(player, bot, currentSquadSize = 0, league = 'ipl') {
     const pool = (player.poolID || "").toLowerCase();
     const botName = bot.ownerName;
 
+    // --- LEAGUE COMPOSITION RULES & ROSTER TRACKING ---
+    let minSquad = 17;
+    let maxSquad = 25;
+    let minBowlers = 5;
+    let minWk = 2;
+    let maxOverseas = 8;
+    let minSA = 0;
+    let minUncapped = 0;
+
+    if (league === 'wpl') {
+        minSquad = 15;
+        maxSquad = 18;
+        minBowlers = 4;
+        minWk = 2;
+        maxOverseas = 8;
+    } else if (league === 'sa20') {
+        minSquad = 15;
+        maxSquad = 20;
+        minBowlers = 3;
+        minWk = 2;
+        maxOverseas = 7;
+        minSA = 10;
+        minUncapped = 2;
+    }
+
+    const acquiredPlayers = bot.playersAcquired || [];
+    
+    // Check role helpers
+    const isPureBowler = (playerOrRole, optionalPool) => {
+        let role = '';
+        let pool = '';
+
+        if (typeof playerOrRole === 'object' && playerOrRole !== null) {
+            role = String(playerOrRole.role || '').toLowerCase().trim();
+            pool = String(playerOrRole.poolName || playerOrRole.poolID || playerOrRole.collectionName || '').toLowerCase().trim();
+        } else {
+            role = String(playerOrRole || '').toLowerCase().trim();
+            pool = String(optionalPool || '').toLowerCase().trim();
+        }
+
+        if (!role && !pool) return false;
+
+        if (pool.includes('allrounder') || pool.includes('all_rounder') || pool.includes('all-rounder') || pool.includes('all rounder')) {
+            return false;
+        }
+
+        if (pool.includes('bowler') || pool.includes('bowl')) {
+            return true;
+        }
+
+        if (role.includes('allrounder') || role.includes('all-rounder') || role.includes('all rounder')) {
+            return false;
+        }
+
+        return role.includes('bowler') || role.includes('bowl') || role.includes('pace') || role.includes('fast') || role.includes('spin');
+    };
+
+    const isWicketkeeper = (role) => {
+        const r = String(role || '').toLowerCase();
+        return r === 'wicketkeeper' || r === 'wicket keeper' || r.includes('keeper') || r.includes('wk');
+    };
+
+    const isOverseasPlayer = (p) => {
+        return !!p.isOverseas || !!p.overseas;
+    };
+
+    const currentBowlers = acquiredPlayers.filter(p => isPureBowler(p.role)).length;
+    const currentWk = acquiredPlayers.filter(p => isWicketkeeper(p.role)).length;
+    const currentOverseas = acquiredPlayers.filter(isOverseasPlayer).length;
+    const currentSA = league === 'sa20' ? acquiredPlayers.filter(p => !isOverseasPlayer(p)).length : 0;
+    const currentUncapped = league === 'sa20' ? acquiredPlayers.filter(p => isSa20UncappedAcquired(p)).length : 0;
+
+    // --- ELIGIBILITY GUARDS ---
+    // 1. Max Squad Cap
+    if (currentSquadSize >= maxSquad) {
+        return 0;
+    }
+
+    // 2. Overseas Cap
+    if (isOverseasPlayer(player) && currentOverseas >= maxOverseas) {
+        return 0;
+    }
+
+    // 3. SA20: Save slots for SA domestic players if remaining slots equals domestic players needed
+    if (league === 'sa20' && isOverseasPlayer(player)) {
+        const saNeeded = minSA - currentSA;
+        const remainingSlots = maxSquad - currentSquadSize;
+        if (remainingSlots <= saNeeded) {
+            return 0; // Save remaining slots for domestic SA players to avoid disqualification
+        }
+    }
+
     // Base multipliers and thresholds
     let minMult = 1.2;
     let maxMult = 2.5;
@@ -3116,11 +3697,39 @@ function getBotValuation(player, bot, currentSquadSize = 0, league = 'ipl') {
         maxCap = 400;
     }
 
-    // Uncapped rules for SA20: if SA20, player is uncapped, and bot has < 2 uncapped, boost valuation
+    // --- LEAGUE SPECIFIC ROLE URGENCY INCENTIVES / PENALTIES ---
+    // 1. Lacking Wicketkeepers
+    if (isWicketkeeper(player.role)) {
+        if (currentWk < minWk) {
+            const gap = minWk - currentWk;
+            const boost = 1.0 + (gap * 0.35); // 35% boost per missing keeper
+            minMult *= boost;
+            maxMult *= boost;
+            maxCap *= boost;
+        } else {
+            // Already have enough keepers, don't overspend on more
+            minMult *= 0.5;
+            maxMult *= 0.5;
+            maxCap *= 0.4;
+        }
+    }
+
+    // 2. Lacking Pure Bowlers
+    if (isPureBowler(player.role)) {
+        if (currentBowlers < minBowlers) {
+            const gap = minBowlers - currentBowlers;
+            const boost = 1.0 + (gap * 0.15); // 15% boost per missing bowler
+            minMult *= boost;
+            maxMult *= boost;
+            maxCap *= boost;
+        }
+    }
+
+    // 3. SA20: Lacking Uncapped
     if (league === 'sa20' && isSa20UncappedAcquired(player)) {
-        const uncappedCount = (bot.playersAcquired || []).filter(p => isSa20UncappedAcquired(p)).length;
-        if (uncappedCount < 2) {
-            const boost = uncappedCount === 0 ? 1.8 : 1.4;
+        if (currentUncapped < minUncapped) {
+            const gap = minUncapped - currentUncapped;
+            const boost = 1.0 + (gap * 0.4); // 40% boost per missing uncapped SA player
             minMult *= boost;
             maxMult *= boost;
             maxCap *= boost;
@@ -3134,7 +3743,6 @@ function getBotValuation(player, bot, currentSquadSize = 0, league = 'ipl') {
     const purseRatio = currentPurse / totalBudget;
     
     // Exponential damping as budget runs low
-    // If purseRatio is 1.0, factor is 1.0. If 0.5, factor is 0.7. If 0.2, factor is ~0.45.
     const budgetFactor = Math.pow(purseRatio, 0.6);
     
     maxMult *= budgetFactor;
@@ -3149,25 +3757,26 @@ function getBotValuation(player, bot, currentSquadSize = 0, league = 'ipl') {
     const isExtreme = Math.random() < starChance;
     if (isExtreme) {
         maxMult += (2.0 * budgetFactor);
-        maxCap += ((startPurse * 0.025) * budgetFactor); // Proportional star boost (e.g. 300L for 12000L, 8.5L for 340L)
+        maxCap += ((startPurse * 0.025) * budgetFactor); // Proportional star boost
     }
 
-    // [RULE] Urgency Factor: If below targetMin players, bots become more desperate
-    const targetMin = startPurse <= 500 ? 17 : (startPurse <= 2000 ? 15 : 18);
-    const minReservePerPlayer = getMinReservePerPlayer(startPurse);
-
-    if (currentSquadSize < targetMin) {
-        const urgencyBoost = (targetMin - currentSquadSize) * 0.25; // Adjusted
+    // [RULE] Urgency Factor: If below minSquad players, bots become more desperate
+    if (currentSquadSize < minSquad) {
+        const urgencyBoost = (minSquad - currentSquadSize) * 0.25; 
         minMult += urgencyBoost;
         maxMult += urgencyBoost;
-        // Do NOT add to maxCap here, keep caps absolute per pool
     }
 
-    // [RULE] 80/20 Budget Strategy
-    // 80% of purse for first 10 players. 20% for remaining.
+    // [RULE] 80/20 Budget Strategy (Thinkful Spending in early phase)
     if (currentSquadSize < 10) {
         // Strict cap per player in early phase to prevent single-player blowout
-        const spendingCap = startPurse * 0.175; // 17.5% of starting purse (e.g. 2100L for IPL, 59.5L for SA20)
+        let earlyCapPct = 0.15; // 15% default
+        if (pool.includes('marquee')) {
+            earlyCapPct = 0.25; // 25% for marquee
+        } else if (pool.includes('pool1')) {
+            earlyCapPct = 0.18; // 18% for pool1
+        }
+        const spendingCap = startPurse * earlyCapPct;
         if (maxCap > spendingCap) maxCap = spendingCap;
         
         // Dynamic Ceiling based on current avg slot value
@@ -3181,8 +3790,9 @@ function getBotValuation(player, bot, currentSquadSize = 0, league = 'ipl') {
         if (maxCap > dynamicCeiling) maxCap = dynamicCeiling;
     } else {
         // Calculative phase: Strictly reserve for targetMin players
-        const neededForMin = Math.max(1, targetMin - currentSquadSize);
+        const neededForMin = Math.max(1, minSquad - currentSquadSize);
         // Reserve minReservePerPlayer per player + slightly more buffer
+        const minReservePerPlayer = getMinReservePerPlayer(startPurse);
         const reserveMargin = neededForMin * minReservePerPlayer * 1.2; 
         const safeMax = (currentPurse - reserveMargin) / neededForMin;
         
@@ -3293,15 +3903,15 @@ function handleBotBidding(roomCode, io) {
         const startPrice = (state.league === 'wpl' || state.league === 'sa20') ? (currentPlayer.basePrice || 10) : Math.max(25, Math.floor((currentPlayer.basePrice || 0) / 25) * 25);
         const nextBid = getRequiredBid(state.currentBid.amount || 0, startPrice, currentPlayer.poolID, state.league);
 
-        const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
-        const maxOverseas = state.league === 'wpl' ? 6 : (state.league === 'sa20' ? 7 : 8);
+        const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 20 : 25);
+        const maxOverseas = state.league === 'wpl' ? 8 : (state.league === 'sa20' ? 7 : 8);
         return t.isBot && 
                t.currentPurse >= nextBid && 
                squadSize < maxSquad && 
                !(currentPlayer.isOverseas && overseasCount >= maxOverseas) && 
                state.currentBid.teamId !== t.franchiseId &&
-               isBotSustainable(t, nextBid) &&
-               !isBotOverBudget(t, nextBid); // [STRICT] 80/20 Rule
+               isBotSustainable(t, nextBid, state.league) &&
+               !isBotOverBudget(t, nextBid, state.league); // [STRICT] 80/20 Rule
     });
 
     if (eligibleBots.length === 0) return;
@@ -3445,6 +4055,14 @@ async function autoResolveCurrentPlayer(roomCode, io, nextPlayerDelay = 3000) {
     let currentBidAmount = state.currentBid.amount || 0;
     
     // Find all bots interested
+    let step = 25;
+    if (state.league === 'wpl') {
+        step = 5;
+    } else if (state.league === 'sa20') {
+        step = 0.25;
+    }
+    const minNextBid = Math.max(currentPlayer.basePrice, currentBidAmount + step);
+
     let interestedBots = state.teams
         .filter(t => t.isBot && t.franchiseId !== state.currentBid.teamId)
         .map(bot => {
@@ -3452,14 +4070,14 @@ async function autoResolveCurrentPlayer(roomCode, io, nextPlayerDelay = 3000) {
             const squadSize = bot.playersAcquired?.length || 0;
             const overseasCount = bot.overseasCount || 0;
 
-            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
-            const maxOverseas = state.league === 'wpl' ? 6 : (state.league === 'sa20' ? 7 : 8);
+            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 20 : 25);
+            const maxOverseas = state.league === 'wpl' ? 8 : (state.league === 'sa20' ? 7 : 8);
             const canAfford = bot.currentPurse >= minNextBid;
             const notFull = squadSize < maxSquad;
             const osLimitNotReached = !(currentPlayer.isOverseas && overseasCount >= maxOverseas);
             const wantsToPayMore = valuation >= minNextBid;
-            const sustainable = isBotSustainable(bot, minNextBid);
-            const notOverBudget = !isBotOverBudget(bot, minNextBid);
+            const sustainable = isBotSustainable(bot, minNextBid, state.league);
+            const notOverBudget = !isBotOverBudget(bot, minNextBid, state.league);
 
             if (canAfford && notFull && osLimitNotReached && wantsToPayMore && sustainable && notOverBudget) {
                 return { bot, valuation };
@@ -3476,13 +4094,6 @@ async function autoResolveCurrentPlayer(roomCode, io, nextPlayerDelay = 3000) {
         const runnerUpVal = interestedBots[1]?.valuation || currentBidAmount;
 
         // Winning price is max(basePrice, currentAmt, runnerUp valuation + 25)
-        // [FIX] Ensure finalPrice is rounded to 25L increments
-        let step = 25;
-        if (state.league === 'wpl') {
-            step = 5;
-        } else if (state.league === 'sa20') {
-            step = 0.25;
-        }
         let finalPrice = Math.max(currentPlayer.basePrice, currentBidAmount, (Math.floor(runnerUpVal / step) * step) + step);
         if (finalPrice > winner.valuation) finalPrice = winner.valuation;
         if (finalPrice > winner.bot.currentPurse) finalPrice = (Math.floor(winner.bot.currentPurse / step) * step);
@@ -3584,11 +4195,19 @@ async function handleRtmDecision(roomCode, io, useRtm) {
             prevTeam.rtmUsed = true;
 
             console.log(`[RTM] ${prevTeamName} matched bid of ${bidAmount}L for ${playerName}!`);
-            // Emit RTM usage visually if needed, but DO NOT emit a raw chat message 
-            // since the subsequent 'player_sold' event will log the RTM acquisition cleanly.
+            io.to(roomCode).emit('receive_chat_message', {
+                sender: 'System',
+                text: `📢 RTM: ${prevTeamName} has matched the highest bid of ${bidAmount}L for ${playerName}!`,
+                timestamp: new Date().toISOString()
+            });
         }
     } else {
         console.log(`[RTM] ${prevTeamName} passed on matching bid of ${bidAmount}L for ${playerName}.`);
+        io.to(roomCode).emit('receive_chat_message', {
+            sender: 'System',
+            text: `📢 RTM: ${prevTeamName} has passed on matching the bid for ${playerName}.`,
+            timestamp: new Date().toISOString()
+        });
     }
 
     // Clean up rtmState
@@ -3614,12 +4233,12 @@ function checkAndTriggerRTM(roomCode, io, nextPlayerDelay = 3000) {
     const player = state.currentPlayer;
     const playerName = player ? (player.player || player.name || 'Unknown Player') : 'Unknown Player';
 
-    if (state.currentBid.amount > 0 && (state.league === 'wpl' || state.league === 'sa20')) {
+    if (state.currentBid.amount > 0 && (state.league === 'wpl' || state.league === 'sa20' || state.league === 'ipl')) {
         const prevTeam = findPreviousTeamForPlayer(state, playerName);
         if (prevTeam) {
             const rtmLeft = (prevTeam.rtmCards || 0) - (prevTeam.rtmUsedCount || 0);
-            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
-            const maxOverseas = state.league === 'wpl' ? 6 : (state.league === 'sa20' ? 7 : 8);
+            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 20 : 25);
+            const maxOverseas = state.league === 'wpl' ? 8 : (state.league === 'sa20' ? 7 : 8);
             const prevTeamOverseasCount = (prevTeam.playersAcquired || []).filter(p => p.isOverseas || p.overseas).length;
             const isOverseasLimitReached = player && (player.isOverseas || player.overseas) && prevTeamOverseasCount >= maxOverseas;
             const isSquadFull = (prevTeam.playersAcquired?.length || 0) >= maxSquad;
@@ -3723,6 +4342,11 @@ async function processHammerDown(roomCode, io, nextPlayerDelay = 3000) {
                 isU23: player.isU23,
                 poolID: player.poolID,
                 poolName: player.poolName,
+                position: player.position || player.batting_position || player['batting position'],
+                batting_position: player.batting_position || player.position || player['batting position'],
+                bowling_type: player.bowling_type || player['bowling type'],
+                batting_style: player.batting_style || player['batting style'],
+                bowling_style: player.bowling_style || player['bowling style'],
                 timestamp: new Date().toISOString()
             });
             winningSocketId = state.teams[winningTeamIndex].ownerSocketId;
@@ -3796,7 +4420,7 @@ async function processHammerDown(roomCode, io, nextPlayerDelay = 3000) {
             // CHECK: Auto-stop if every team has 25 players
             // ensure there is at least one team before treating this as "full" otherwise
             // an empty array would return true and immediately transition to selection
-            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 19 : 25);
+            const maxSquad = state.league === 'wpl' ? 18 : (state.league === 'sa20' ? 20 : 25);
             const ALL_SQUADS_FULL = state.teams.length > 0 && state.teams.every(t => (t.playersAcquired?.length || 0) >= maxSquad);
             if (ALL_SQUADS_FULL) {
                 console.log(`\n--- ALL SQUADS FULL (${maxSquad} players each) in Room ${roomCode} ---`);
@@ -3858,7 +4482,7 @@ function getMinReservePerPlayer(startPurse) {
 /**
  * isBotOverBudget - Enforces the 80/20 rule: 80% of purse for first 10 players.
  */
-function isBotOverBudget(bot, nextBid) {
+function isBotOverBudget(bot, nextBid, league = 'ipl') {
     const startPurse = bot.startingPurse || 12000;
     const currentPurse = bot.currentPurse || 0;
     const spentPurse = startPurse - (currentPurse - nextBid); // Include this bid
@@ -3871,7 +4495,11 @@ function isBotOverBudget(bot, nextBid) {
     }
     
     // [RULE] Extreme conservation if nearing budget exhaustion
-    const remainingNeeded = Math.max(0, 18 - squadSize);
+    let minSquad = 17;
+    if (league === 'wpl' || league === 'sa20') {
+        minSquad = 15;
+    }
+    const remainingNeeded = Math.max(0, minSquad - squadSize);
     const minReserve = getMinReservePerPlayer(startPurse);
     const reserveNeeded = remainingNeeded * minReserve * 1.2; 
     if ((currentPurse - nextBid) < reserveNeeded) {
@@ -3883,13 +4511,16 @@ function isBotOverBudget(bot, nextBid) {
 
 /**
  * isBotSustainable - Checks if a bot can afford to buy the current player
- * AND still have enough purse left to reach the minimum of 18 players
+ * AND still have enough purse left to reach the minimum players of the league
  */
-function isBotSustainable(bot, nextBid) {
+function isBotSustainable(bot, nextBid, league = 'ipl') {
     const startPurse = bot.startingPurse || 12000;
     const currentCount = bot.playersAcquired?.length || 0;
-    const targetMin = startPurse <= 500 ? 17 : (startPurse <= 2000 ? 15 : 18);
-    const remainingNeeded = Math.max(0, targetMin - (currentCount + 1));
+    let minSquad = 17;
+    if (league === 'wpl' || league === 'sa20') {
+        minSquad = 15;
+    }
+    const remainingNeeded = Math.max(0, minSquad - (currentCount + 1));
     const minReserve = getMinReservePerPlayer(startPurse);
     const neededReserve = remainingNeeded * minReserve; 
     const canAfford = (bot.currentPurse - nextBid) >= neededReserve;
@@ -3901,8 +4532,178 @@ function isBotSustainable(bot, nextBid) {
     return canAfford;
 }
 
+function startWildcardPhase(roomCode, io) {
+    const state = roomStates[roomCode];
+    if (!state) return;
+    if (state.status === 'Wildcard' || state.status === 'Finished' || state.status === 'Evaluating') return;
+
+    state.status = 'Wildcard';
+    state.wildcardPicks = state.wildcardPicks || {};
+    state.wildcardSkips = state.wildcardSkips || {};
+
+    // Get all unsold players
+    const acquiredPlayerIds = new Set(
+        state.teams.flatMap(t => (t.playersAcquired || []).map(p => String(p._id || p.playerId)))
+    );
+    const unsoldPlayers = state.players.filter(p => !acquiredPlayerIds.has(String(p._id || p.playerId)));
+
+    io.to(roomCode).emit('wildcard_phase_started', {
+        unsoldPlayers: unsoldPlayers.map(p => ({
+            _id: p._id,
+            playerId: p.playerId || String(p._id),
+            name: p.name || p.player,
+            player: p.name || p.player,
+            role: p.role,
+            nationality: p.nationality || 'Unknown',
+            isOverseas: p.isOverseas || false,
+            basePrice: p.basePrice || p.base_price || 50,
+            photoUrl: p.photoUrl || p.imagepath || p.image_path || '',
+            points: p.points || 0
+        })),
+        picks: state.wildcardPicks,
+        skips: state.wildcardSkips
+    });
+
+    // Also update ActiveRoom in DB
+    persistActiveState(roomCode);
+
+    io.to(roomCode).emit('receive_chat_message', {
+        id: Date.now(),
+        senderName: 'System',
+        senderTeam: 'System',
+        senderColor: '#3b82f6',
+        message: "SA20 Wildcard Entry phase started! Every team with empty slots can select one unsold player.",
+        timestamp: new Date().toLocaleTimeString()
+    });
+
+    // Run AI bot picks after a short delay
+    setTimeout(() => {
+        runBotWildcardPicks(roomCode, io);
+    }, 1500);
+}
+
+function runBotWildcardPicks(roomCode, io) {
+    const state = roomStates[roomCode];
+    if (!state || state.status !== 'Wildcard') return;
+
+    // Get unsold players list
+    const acquiredPlayerIds = new Set(
+        state.teams.flatMap(t => (t.playersAcquired || []).map(p => String(p._id || p.playerId)))
+    );
+    let unsoldPlayers = state.players.filter(p => !acquiredPlayerIds.has(String(p._id || p.playerId)));
+
+    // Sort unsold players by points descending to pick the best available
+    unsoldPlayers.sort((a, b) => (b.points || 0) - (a.points || 0));
+
+    let stateChanged = false;
+
+    for (const team of state.teams) {
+        if (!team.isBot) continue;
+        if (state.wildcardPicks[team.teamName] || state.wildcardSkips[team.teamName]) continue;
+
+        const maxSquad = 20;
+        const currentSquadSize = team.playersAcquired?.length || 0;
+        if (currentSquadSize >= maxSquad) {
+            state.wildcardSkips[team.teamName] = true;
+            stateChanged = true;
+            continue;
+        }
+
+        // Find best player they can afford
+        const pickablePlayer = unsoldPlayers.find(p => team.currentPurse >= (p.basePrice || p.base_price || 50));
+        if (pickablePlayer) {
+            // Pick this player!
+            const price = pickablePlayer.basePrice || pickablePlayer.base_price || 50;
+            team.currentPurse -= price;
+            if (!team.playersAcquired) team.playersAcquired = [];
+            team.playersAcquired.push({
+                _id: pickablePlayer._id,
+                playerId: pickablePlayer.playerId || String(pickablePlayer._id),
+                name: pickablePlayer.name || pickablePlayer.player,
+                player: pickablePlayer.name || pickablePlayer.player,
+                role: pickablePlayer.role,
+                nationality: pickablePlayer.nationality || 'Unknown',
+                isOverseas: pickablePlayer.isOverseas || false,
+                boughtFor: price,
+                basePrice: price,
+                photoUrl: pickablePlayer.photoUrl || pickablePlayer.imagepath || pickablePlayer.image_path || '',
+                points: pickablePlayer.points || 0,
+                isWildcard: true
+            });
+
+            state.wildcardPicks[team.teamName] = pickablePlayer._id;
+            
+            // Remove from local unsold list so other bots don't pick the same player in this loop
+            unsoldPlayers = unsoldPlayers.filter(p => String(p._id) !== String(pickablePlayer._id));
+            stateChanged = true;
+
+            io.to(roomCode).emit('receive_chat_message', {
+                id: Date.now(),
+                senderName: 'System',
+                senderTeam: 'System',
+                senderColor: '#10b981',
+                message: `Bot team ${team.teamName} selected Wildcard player: ${pickablePlayer.name || pickablePlayer.player} for R${price}L.`,
+                timestamp: new Date().toLocaleTimeString()
+            });
+        } else {
+            // Cannot afford any player, skip
+            state.wildcardSkips[team.teamName] = true;
+            stateChanged = true;
+        }
+    }
+
+    if (stateChanged) {
+        // Broadcast update
+        const updatedAcquiredIds = new Set(
+            state.teams.flatMap(t => (t.playersAcquired || []).map(p => String(p._id || p.playerId)))
+        );
+        const remainingUnsold = state.players.filter(p => !updatedAcquiredIds.has(String(p._id || p.playerId)));
+
+        io.to(roomCode).emit('wildcard_state_updated', {
+            unsoldPlayers: remainingUnsold.map(p => ({
+                _id: p._id,
+                playerId: p.playerId || String(p._id),
+                name: p.name || p.player,
+                player: p.name || p.player,
+                role: p.role,
+                nationality: p.nationality || 'Unknown',
+                isOverseas: p.isOverseas || false,
+                basePrice: p.basePrice || p.base_price || 50,
+                photoUrl: p.photoUrl || p.imagepath || p.image_path || '',
+                points: p.points || 0
+            })),
+            picks: state.wildcardPicks,
+            skips: state.wildcardSkips,
+            teams: state.teams
+        });
+
+        persistActiveState(roomCode);
+
+        // Check if all teams are done
+        checkWildcardPhaseCompletion(roomCode, io);
+    }
+}
+
+function checkWildcardPhaseCompletion(roomCode, io) {
+    const state = roomStates[roomCode];
+    if (!state || state.status !== 'Wildcard') return;
+
+    // Check if all teams have either picked or skipped
+    const allDone = state.teams.every(team => {
+        return state.wildcardPicks[team.teamName] || state.wildcardSkips[team.teamName];
+    });
+
+    if (allDone) {
+        console.log(`[WILDCARD] All teams completed wildcard selections in room ${roomCode}. Moving to finalization.`);
+        state.wildcardPhaseCompleted = true;
+        finalizeResults(roomCode, io);
+    }
+}
+
 module.exports = {
     setupSocketHandlers,
     rehydrateRoomState,
-    resumeAuction
+    resumeAuction,
+    runTeamAiEvaluation,
+    findPlayerById
 };

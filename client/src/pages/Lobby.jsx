@@ -12,6 +12,7 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import Toast from "../components/Toast";
 import VoiceControls from "../components/VoiceControls";
+import LeagueNewsMarquee from "../components/LeagueNewsMarquee";
 import { fmtCr, LEAGUE_DEFAULTS } from "../utils/playerUtils";
 
 // ─── Team Data ──────────────────────────────────────────────────────────────
@@ -67,7 +68,7 @@ const LEAGUES = {
     glowColor: 'shadow-[0_0_30px_rgba(212,175,55,0.2)]',
     focusClass: 'focus:border-[#D4AF37]/60',
     tabActiveClass: 'bg-[#D4AF37] text-[#1a1205]',
-    rules: { squad: '18–25 Players', overseas: 'Max 8', bowling: 'Min 6', keeping: 'Min 2' },
+    rules: { squad: '18–25 Players', overseas: 'Max 8', bowling: 'Min 5', keeping: 'Min 2' },
   },
   wpl: {
     id: 'wpl',
@@ -84,7 +85,7 @@ const LEAGUES = {
     glowColor: 'shadow-[0_0_30px_rgba(236,72,153,0.2)]',
     focusClass: 'focus:border-pink-500/60',
     tabActiveClass: 'bg-pink-500 text-white',
-    rules: { squad: '15–18 Players', overseas: 'Max 6', bowling: 'Min 5', keeping: 'Min 2' },
+    rules: { squad: '15–18 Players', overseas: 'Max 8', bowling: 'Min 4', keeping: 'Min 2' },
   },
   sa20: {
     id: 'sa20',
@@ -101,7 +102,7 @@ const LEAGUES = {
     glowColor: 'shadow-[0_0_30px_rgba(6,182,212,0.2)]',
     focusClass: 'focus:border-cyan-500/60',
     tabActiveClass: 'bg-cyan-500 text-white',
-    rules: { squad: '17–19 Players', overseas: 'Max 7', bowling: 'Min 6', keeping: 'Min 2', uncapped: 'Min 2 Uncapped' },
+    rules: { squad: '15–20 Players', overseas: 'Max 7', domestic: 'Min 10 South African', uncapped: 'Min 2 Uncapped', keeping: 'Min 2', bowling: 'Min 3' },
   },
 };
 
@@ -240,7 +241,13 @@ const Lobby = () => {
     socket.emit("claim_team", { roomCode: roomState?.roomCode, teamId: selectedTeamId });
   };
 
-  const handleStart = () => socket.emit("start_auction", { roomCode: roomState.roomCode });
+  const handleStart = () => {
+    if ((roomState?.teams?.length || 0) < 3) {
+      setToast({ message: "At least 3 players (claimed franchises) are required to start the auction room.", type: "warning" });
+      return;
+    }
+    socket.emit("start_auction", { roomCode: roomState.roomCode });
+  };
 
   const handleRequestAccess = () => {
     if (!roomCodeInput) return;
@@ -860,6 +867,11 @@ const Lobby = () => {
                     </button>
                   </div>
 
+                  {/* ── League News Marquee Ticker ── */}
+                  <div className="mb-6">
+                    <LeagueNewsMarquee league={selectedLeague} />
+                  </div>
+
                   <div className="max-w-md mx-auto w-full">
                     {/* Right: Actions */}
                     <div className="space-y-5">
@@ -931,7 +943,7 @@ const Lobby = () => {
                           <div className="space-y-3">
                             <label className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center justify-between">
                               <span>Auction Currency</span>
-                              <span className="text-[10px] font-bold text-slate-500">All prices will convert</span>
+                              <span className="text-[10px] font-bold text-amber-400/80">Shows USD with exact INR equivalent</span>
                             </label>
                             <div className="grid grid-cols-2 gap-3 p-1 bg-white/5 rounded-xl border border-white/5">
                               {[
@@ -1174,6 +1186,11 @@ const Lobby = () => {
                     <LogOut className="w-3.5 h-3.5" /> Leave
                   </button>
                 </div>
+              </div>
+
+              {/* ── League News Marquee Ticker (In-Room Lobby) ── */}
+              <div className="mb-6">
+                <LeagueNewsMarquee league={activeLeague} />
               </div>
 
               {/* ── Lobby Waiting Area / Dashboard ── */}
@@ -1722,7 +1739,7 @@ const Lobby = () => {
                         {Object.entries(theme.rules).map(([key, val]) => (
                           <div key={key} className="flex items-center justify-between py-2 border-b border-white/5 last:border-0">
                             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                              {key === 'squad' ? 'Squad Size' : key === 'overseas' ? 'Overseas Players' : key === 'bowling' ? 'Min Bowlers' : key === 'keeping' ? 'Min Wicketkeepers' : key === 'uncapped' ? 'Uncapped Players' : 'U-23 Players'}
+                              {key === 'squad' ? 'Squad Size' : key === 'overseas' ? 'Overseas Players' : key === 'bowling' ? 'Min Pure Bowlers' : key === 'keeping' ? 'Min Wicketkeepers' : key === 'uncapped' ? 'Uncapped Players' : key === 'domestic' ? 'South African Players' : 'U-23 Players'}
                             </span>
                             <span className="text-xs font-black text-white">{val}</span>
                           </div>
@@ -1765,7 +1782,7 @@ const Lobby = () => {
                         >
                           🚀 Start Auction
                         </button>
-                        <p className="text-[9px] text-slate-600 text-center">All players must pick a team before you start</p>
+                        <p className="text-[9px] text-slate-600 text-center">At least 3 players must pick a team before you start</p>
                       </div>
                     )}
                   </div>
@@ -2316,7 +2333,7 @@ const Lobby = () => {
                     {Object.entries(league.rules).map(([key, val]) => (
                       <div key={key} className="flex flex-col p-3 rounded-xl bg-white/[0.02] border border-white/5">
                         <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">
-                          {key === 'squad' ? 'Squad Size' : key === 'overseas' ? 'Overseas' : key === 'bowling' ? 'Bowlers' : key === 'keeping' ? 'Wicketkeepers' : key === 'uncapped' ? 'Uncapped' : 'U-23 Players'}
+                          {key === 'squad' ? 'Squad Size' : key === 'overseas' ? 'Overseas' : key === 'bowling' ? 'Pure Bowlers' : key === 'keeping' ? 'Wicketkeepers' : key === 'uncapped' ? 'Uncapped' : key === 'domestic' ? 'SA Players' : 'U-23 Players'}
                         </span>
                         <span className="text-xs font-bold text-white">{val}</span>
                       </div>

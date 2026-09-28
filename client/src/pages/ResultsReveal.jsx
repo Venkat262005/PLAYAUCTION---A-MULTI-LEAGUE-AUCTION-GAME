@@ -4,11 +4,21 @@ import { motion, AnimatePresence } from 'framer-motion'; // eslint-disable-line 
 import { toPng } from 'html-to-image';
 import TeamShareCard from '../components/TeamShareCard';
 import GlobalResultCard from '../components/GlobalResultCard';
-import { X, AlertTriangle, CheckCircle2, Trophy, Shield, Star, Zap, Brain, Clock } from 'lucide-react';
-import { fmtCr } from '../utils/playerUtils';
+import CustomLineupModal from '../components/CustomLineupModal';
+import { X, AlertTriangle, CheckCircle2, Trophy, Shield, Star, Zap, Brain, Clock, Award, Flame, TrendingUp, AlertOctagon, ArrowRight, Sparkles, ShieldCheck, ShieldAlert, Sliders } from 'lucide-react';
+import { fmtCr, LEAGUE_DEFAULTS } from '../utils/playerUtils';
+import { getTeamLogoUrl } from '../utils/teamLogos';
 import Toast from '../components/Toast';
 
 /* ─── helpers ─── */
+const getRankBadgeInfo = (rank) => {
+    if (rank === 1) return { label: '🏆 Champions / Title Favourite', bg: 'bg-amber-500/10 border-amber-500/30 text-amber-300' };
+    if (rank === 2) return { label: '🥈 Finalist Contender', bg: 'bg-slate-300/10 border-slate-300/30 text-slate-200' };
+    if (rank === 3) return { label: '🥉 3rd Place (Playoffs)', bg: 'bg-amber-700/10 border-amber-600/30 text-amber-200' };
+    if (rank === 4) return { label: '🎯 4th Place (Playoffs Qualifier)', bg: 'bg-blue-500/10 border-blue-500/30 text-blue-300' };
+    return { label: `📉 ${rank}th Place (Eliminated)`, bg: 'bg-rose-500/10 border-rose-500/30 text-rose-300' };
+};
+
 const MetricBar = ({ label, value, color = '#D4AF37', max = 100 }) => {
     const pct = Math.min(100, Math.max(0, (value / max) * 100));
     return (
@@ -114,18 +124,68 @@ const normalizeEvaluation = (evaluation = {}) => {
         || evaluation.awayImpactPlayers
         || [];
 
-    const strengths = evaluation.strengths || [];
-    const weaknesses = evaluation.weaknesses || [];
+    const disqualificationReason = evaluation.disqualificationReason
+        || (evaluation.analysis?.batting_narrative?.startsWith('DISQUALIFIED') ? evaluation.analysis.batting_narrative : null);
+    const fixMessage = evaluation.analysis?.key_risks_and_fixes || null;
+
+    const strengths = evaluation.strengths && evaluation.strengths.length > 0
+        ? evaluation.strengths
+        : (disqualificationReason ? ['Roster rule violation'] : []);
+    const weaknesses = evaluation.weaknesses && evaluation.weaknesses.length > 0
+        ? evaluation.weaknesses
+        : (disqualificationReason ? [disqualificationReason, fixMessage].filter(Boolean) : []);
     const keyPlayers = evaluation.key_players || [evaluation.starPlayer].filter(Boolean);
-    const summary = evaluation.summary || evaluation.tacticalVerdict || '';
-    const rating = evaluation.rating ?? Math.round((evaluation.overallScore ?? 0) / 10);
+    const summary = evaluation.summary || evaluation.broad_summary || evaluation.tacticalVerdict || disqualificationReason || '';
+    const rating = evaluation.overallScore ?? evaluation.rating ?? Math.round((evaluation.overallScore ?? 0) / 10);
     const auctionGrade = evaluation.auction_grade || (
-        rating >= 9 ? 'S+' :
-        rating >= 8 ? 'A+' :
-        rating >= 7 ? 'A' :
-        rating >= 6 ? 'B+' :
-        rating >= 5 ? 'B' : 'C'
+        disqualificationReason ? 'D' :
+        rating >= 90 ? 'A+' :
+        rating >= 80 ? 'A' :
+        rating >= 70 ? 'B+' :
+        rating >= 60 ? 'B' :
+        rating >= 50 ? 'C' : 'D'
     );
+
+    const parseBuy = (buy) => {
+        if (!buy) return null;
+        if (typeof buy === 'object') {
+            const p = buy.player || buy.name;
+            if (!p || p === 'None Identified' || p === 'N/A') return null;
+            return {
+                player: p,
+                price: buy.price && buy.price !== 'N/A' ? `${buy.price}` : '',
+                rationale: buy.rationale || buy.analysis || buy.reason || ''
+            };
+        }
+        if (typeof buy === 'string') {
+            if (!buy || buy === 'None Identified' || buy === 'N/A') return null;
+            const match = buy.match(/^([^(]+)(?:\(([^)]+)\))?\s*(?:[-–:]\s*(.*))?$/);
+            if (match) {
+                return {
+                    player: (match[1] || buy).trim(),
+                    price: (match[2] || '').trim(),
+                    rationale: (match[3] || '').trim()
+                };
+            }
+            return { player: buy, price: '', rationale: '' };
+        }
+        return null;
+    };
+
+    const bestBuy = parseBuy(evaluation.best_buy);
+    const stealOfAuction = parseBuy(evaluation.steal_of_auction) || (evaluation.bestValuePick ? parseBuy(evaluation.bestValuePick) : null);
+    const worstBuy = parseBuy(evaluation.worst_buy);
+
+    const benchReplacements = Array.isArray(evaluation.bench_like_for_like_replacements)
+        ? evaluation.bench_like_for_like_replacements
+        : [];
+
+    const phaseRatings = evaluation.phase_ratings || null;
+    const pitchSuitability = evaluation.pitch_suitability || null;
+    const tournamentProjection = evaluation.tournament_projection || null;
+    const squadMetrics = evaluation.squad_metrics || null;
+    const missingRoles = Array.isArray(evaluation.missing_roles) ? evaluation.missing_roles : [];
+    const overpaidPlayers = Array.isArray(evaluation.overpaid_players) ? evaluation.overpaid_players.map(parseBuy).filter(Boolean) : [];
 
     return {
         rating,
@@ -136,6 +196,18 @@ const normalizeEvaluation = (evaluation = {}) => {
         keyPlayers,
         auctionGrade,
         summary,
+        bestBuy,
+        stealOfAuction,
+        worstBuy,
+        benchReplacements,
+        phaseRatings,
+        pitchSuitability,
+        tournamentProjection,
+        squadMetrics,
+        missingRoles,
+        overpaidPlayers,
+        disqualificationReason,
+        fixMessage
     };
 };
 
@@ -155,8 +227,9 @@ const ResultsReveal = () => {
     const [roomCurrency, setRoomCurrency] = useState('inr');
     const [league, setLeague] = useState('ipl');
     const [showQuizLeaderboard, setShowQuizLeaderboard] = useState(false);
+    const [showCustomLineupModal, setShowCustomLineupModal] = useState(false);
 
-    const fmt = (lakhs) => fmtCr(lakhs, roomCurrency);
+    const fmt = (lakhs) => fmtCr(lakhs, roomCurrency, LEAGUE_DEFAULTS[league] || 'inr');
 
     useEffect(() => {
         const apiUrl = import.meta.env.VITE_API_URL || '';
@@ -485,15 +558,22 @@ const ResultsReveal = () => {
                                                 <div className="absolute top-0 inset-x-0 h-[1px] bg-gradient-to-r from-transparent via-yellow-500/60 to-transparent" />
                                             )}
 
-                                            <div className="flex justify-between items-start gap-2">
+                                            <div className="flex justify-between items-start gap-3">
+                                                <div className="w-10 h-10 rounded-xl bg-white p-1 shrink-0 flex items-center justify-center shadow-md border border-white/20">
+                                                    <img
+                                                        src={getTeamLogoUrl(team.teamName, league, team.logoUrl)}
+                                                        alt={team.teamName}
+                                                        className="w-full h-full object-contain"
+                                                    />
+                                                </div>
                                                 <div className="flex-1 min-w-0">
-                                                    <div className="mb-2">
+                                                    <div className="mb-1.5">
                                                         {isDisqualified
                                                             ? <span className="text-[9px] font-black uppercase tracking-widest text-red-500 bg-red-500/10 px-2 py-1 rounded-lg border border-red-500/20">❌ Disqualified</span>
                                                             : <RankMedal rank={team.rank} />
                                                         }
                                                     </div>
-                                                    <div className="text-base font-black uppercase tracking-tight truncate">{team.teamName}</div>
+                                                    <div className="text-sm font-black uppercase tracking-tight truncate">{team.teamName}</div>
                                                     <div className="text-[9px] text-slate-500 font-bold uppercase mt-0.5">{team.ownerName}</div>
                                                 </div>
                                                 <div className="text-right shrink-0">
@@ -529,150 +609,505 @@ const ResultsReveal = () => {
                             {/* ─── RIGHT: Squad Detail Card ─── */}
                             <div className="lg:col-span-9">
                                 <AnimatePresence mode="wait">
-                                    {selectedTeam ? (
-                                        <motion.div
-                                            key={selectedTeam.teamId}
-                                            initial={{ opacity: 0, y: 20, scale: 0.98 }}
-                                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                                            exit={{ opacity: 0, scale: 0.97 }}
-                                            transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-                                            className="relative bg-slate-950/70 backdrop-blur-xl border border-white/8 rounded-[32px] md:rounded-[40px] p-5 md:p-8 shadow-[0_40px_80px_rgba(0,0,0,0.6)] overflow-hidden flex flex-col"
-                                        >
-                                            {/* Top shimmer line */}
-                                            <div className="absolute top-0 inset-x-0 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent" />
-                                            <div className="absolute top-0 inset-x-0 h-[1px]" style={{ background: `linear-gradient(90deg, transparent, ${selectedTeam.teamThemeColor}50, transparent)` }} />
+                                    {selectedTeam ? (() => {
+                                        const evalData = normalizeEvaluation(selectedTeam.evaluation);
+                                        const summaryParas = (evalData.summary || '')
+                                            .split(/\n+/)
+                                            .map(p => p.trim())
+                                            .filter(Boolean);
 
-                                            {/* ─── AI Summary Header ─── */}
-                                            <div className="grid grid-cols-1 xl:grid-cols-[1.5fr_0.9fr] gap-5 mb-6">
-                                                <div className="rounded-[28px] border border-white/8 bg-white/[0.03] p-5 md:p-6">
-                                                    <div className="flex items-start justify-between gap-4">
-                                                        <div className="min-w-0">
-                                                            <div className="flex items-center gap-3 mb-3">
-                                                                <div className="w-1.5 h-12 rounded-full shrink-0" style={{ backgroundColor: selectedTeam.teamThemeColor, boxShadow: `0 0 15px ${selectedTeam.teamThemeColor}60` }} />
-                                                                <div className="min-w-0">
-                                                                    <h2 className="text-2xl sm:text-3xl lg:text-4xl font-black uppercase tracking-tighter italic truncate">{selectedTeam.teamName}</h2>
-                                                                    <p className="text-[9px] font-black uppercase tracking-[0.35em] text-slate-500 mt-1">{selectedTeam.ownerName}</p>
-                                                                </div>
+                                        return (
+                                            <motion.div
+                                                key={selectedTeam.teamId}
+                                                initial={{ opacity: 0, y: 20, scale: 0.98 }}
+                                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                                exit={{ opacity: 0, scale: 0.97 }}
+                                                transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                                                className="relative bg-slate-950/70 backdrop-blur-xl border border-white/8 rounded-[32px] md:rounded-[40px] p-5 md:p-8 shadow-[0_40px_80px_rgba(0,0,0,0.6)] overflow-hidden flex flex-col gap-6"
+                                            >
+                                                {/* Top shimmer line */}
+                                                <div className="absolute top-0 inset-x-0 h-[1px] bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+                                                <div className="absolute top-0 inset-x-0 h-[1px]" style={{ background: `linear-gradient(90deg, transparent, ${selectedTeam.teamThemeColor}50, transparent)` }} />
+
+                                                {/* ─── Disqualification Notice Banner (if disqualified) ─── */}
+                                                {(evalData.disqualificationReason || selectedTeam.evaluation?.overallScore === 0) && (
+                                                    <div className="rounded-[24px] border border-red-500/40 bg-red-500/10 p-5 flex items-start gap-4 shadow-[0_0_30px_rgba(239,68,68,0.15)]">
+                                                        <div className="w-10 h-10 rounded-2xl bg-red-500/20 border border-red-500/30 flex items-center justify-center shrink-0 text-red-400 mt-0.5">
+                                                            <AlertTriangle className="w-5 h-5" />
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="text-[10px] font-black uppercase tracking-widest text-red-400 bg-red-500/20 px-2 py-0.5 rounded-md border border-red-500/30">
+                                                                    Squad Disqualified
+                                                                </span>
+                                                                <span className="text-[9px] font-bold uppercase tracking-wider text-red-300/60">
+                                                                    Score: 0/100
+                                                                </span>
                                                             </div>
-                                                            {normalizeEvaluation(selectedTeam.evaluation).summary && (
-                                                                <p className="text-slate-300 font-bold leading-relaxed text-[11px] md:text-xs max-w-3xl">
-                                                                    {normalizeEvaluation(selectedTeam.evaluation).summary}
-                                                                </p>
+                                                            <div className="text-sm sm:text-base font-bold text-red-100 mt-1.5 leading-snug">
+                                                                {evalData.disqualificationReason || selectedTeam.evaluation?.analysis?.batting_narrative || "Squad failed key roster eligibility rules."}
+                                                            </div>
+                                                            {evalData.fixMessage && (
+                                                                <div className="text-xs text-red-300 font-medium mt-1.5 flex items-center gap-1.5">
+                                                                    <span className="font-bold uppercase tracking-wider text-[10px] bg-red-500/20 px-1.5 py-0.5 rounded text-red-300">How to Fix</span>
+                                                                    <span>{evalData.fixMessage}</span>
+                                                                </div>
                                                             )}
                                                         </div>
+                                                    </div>
+                                                )}
 
-                                                        <div className="flex flex-col items-end gap-2 shrink-0">
-                                                            <div className="px-3 py-1 rounded-full border border-white/10 bg-white/5 text-[9px] font-black uppercase tracking-[0.35em] text-slate-300">
-                                                                AI Grade
+                                                {/* ─── AI Header & Core Grade ─── */}
+                                                <div className="rounded-[28px] border border-white/8 bg-white/[0.03] p-5 md:p-6">
+                                                    <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                                                        <div className="min-w-0">
+                                                            <div className="flex items-center gap-3.5 mb-2">
+                                                                <div className="w-12 h-12 rounded-2xl bg-white p-1.5 shrink-0 flex items-center justify-center shadow-lg border border-white/20">
+                                                                    <img
+                                                                        src={getTeamLogoUrl(selectedTeam.teamName, league, selectedTeam.logoUrl)}
+                                                                        alt={selectedTeam.teamName}
+                                                                        className="w-full h-full object-contain"
+                                                                    />
+                                                                </div>
+                                                                <div className="min-w-0">
+                                                                    <h2 className="text-2xl sm:text-3xl lg:text-4xl font-black uppercase tracking-tighter italic truncate">{selectedTeam.teamName}</h2>
+                                                                    <div className="flex items-center gap-2 mt-1">
+                                                                        <span className="text-[9px] font-black uppercase tracking-[0.35em] text-slate-400">👑 {selectedTeam.ownerName}</span>
+                                                                        {selectedTeam.rank && (() => {
+                                                                            const badge = getRankBadgeInfo(selectedTeam.rank);
+                                                                            return (
+                                                                                <span className={`text-[8px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${badge.bg}`}>
+                                                                                    {badge.label}
+                                                                                </span>
+                                                                            );
+                                                                        })()}
+                                                                    </div>
+                                                                </div>
                                                             </div>
-                                                            <div className="text-4xl font-black font-mono leading-none" style={{ color: selectedTeam.teamThemeColor }}>
-                                                                {normalizeEvaluation(selectedTeam.evaluation).rating}
-                                                                <span className="text-lg text-slate-500">/10</span>
+                                                        </div>
+
+                                                        <div className="flex items-center gap-3 shrink-0 self-end md:self-auto">
+                                                            <div className="flex flex-col items-end">
+                                                                <div className="text-4xl font-black font-mono leading-none" style={{ color: selectedTeam.teamThemeColor }}>
+                                                                    {evalData.rating}
+                                                                    <span className="text-lg text-slate-500">/100</span>
+                                                                </div>
+                                                                <div className="text-[8px] font-black text-slate-500 uppercase tracking-widest mt-1">AI Composite Score</div>
                                                             </div>
-                                                            <div className="px-4 py-1.5 rounded-2xl border border-amber-500/20 bg-amber-500/10 text-amber-300 text-[10px] font-black uppercase tracking-[0.3em]">
-                                                                {normalizeEvaluation(selectedTeam.evaluation).auctionGrade}
+                                                            <div className="flex flex-col items-center justify-center px-4 py-2 rounded-2xl border border-amber-500/30 bg-amber-500/10">
+                                                                <span className="text-[7px] font-black uppercase tracking-widest text-amber-400/80">Grade</span>
+                                                                <span className="text-xl font-black text-amber-300 leading-none">{evalData.auctionGrade}</span>
                                                             </div>
                                                         </div>
                                                     </div>
 
-                                                    <div className="flex flex-wrap gap-2 mt-5">
-                                                        <InfoCard label="Key Players" value={
-                                                            <div className="flex flex-wrap gap-2">
-                                                                {normalizeEvaluation(selectedTeam.evaluation).keyPlayers.length ? normalizeEvaluation(selectedTeam.evaluation).keyPlayers.map((item, idx) => (
-                                                                    <span key={`${item}-${idx}`} className="px-2.5 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/15 text-[10px] font-black uppercase tracking-wider text-yellow-200">
-                                                                        {item}
-                                                                    </span>
-                                                                )) : 'Not specified'}
-                                                            </div>
-                                                        } accent={selectedTeam.teamThemeColor} />
-                                                    </div>
-                                                </div>
+                                                    {/* Key Players & Custom Lineup Action */}
+                                                    <div className="flex flex-wrap items-center justify-between gap-3 mt-4 pt-4 border-t border-white/5">
+                                                        <div className="flex flex-wrap items-center gap-2">
+                                                            <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 mr-1">Key Match-Winners:</span>
+                                                            {evalData.keyPlayers.length ? evalData.keyPlayers.map((item, idx) => (
+                                                                <span key={`${item}-${idx}`} className="px-2.5 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-[10px] font-black uppercase tracking-wider text-yellow-200">
+                                                                    ⭐ {item}
+                                                                </span>
+                                                            )) : <span className="text-[10px] text-slate-500">Core starters</span>}
+                                                        </div>
 
-                                                <div className="grid grid-cols-2 gap-3">
-                                                    <InfoCard label="Rating" value={`${normalizeEvaluation(selectedTeam.evaluation).rating}/10`} accent={selectedTeam.teamThemeColor} />
-                                                    <InfoCard label="Auction Grade" value={normalizeEvaluation(selectedTeam.evaluation).auctionGrade || '—'} accent="#fbbf24" />
-                                                    <InfoCard label="Playing XI" value={`${normalizeEvaluation(selectedTeam.evaluation).playingXi.length} Selected`} accent="#60a5fa" />
-                                                    <InfoCard label="Substitutes" value={`${normalizeEvaluation(selectedTeam.evaluation).substitutes.length} Listed`} accent="#a78bfa" />
-                                                </div>
-                                            </div>
-
-                                            {/* ─── AI Output Sections ─── */}
-                                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-                                                <div className="rounded-3xl border border-blue-500/10 bg-blue-500/5 p-5">
-                                                    <div className="flex items-center justify-between mb-4">
-                                                        <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-blue-300">Playing XI</h4>
-                                                        <span className="text-[8px] font-black uppercase tracking-[0.3em] text-blue-300/40">Best XI</span>
-                                                    </div>
-                                                    <ArrayChips items={normalizeEvaluation(selectedTeam.evaluation).playingXi} emptyText="No playing XI returned" tone="sky" />
-                                                </div>
-
-                                                <div className="rounded-3xl border border-violet-500/10 bg-violet-500/5 p-5">
-                                                    <div className="flex items-center justify-between mb-4">
-                                                        <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-violet-300">Substitutes</h4>
-                                                        <span className="text-[8px] font-black uppercase tracking-[0.3em] text-violet-300/40">4 Impact Subs</span>
-                                                    </div>
-                                                    <ArrayChips items={normalizeEvaluation(selectedTeam.evaluation).substitutes} emptyText="No substitutes returned" tone="violet" />
-                                                </div>
-                                            </div>
-
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                                                <div className="rounded-3xl border border-emerald-500/10 bg-emerald-500/5 p-5">
-                                                    <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-emerald-300 mb-3">Strengths</h4>
-                                                    <ArrayChips items={normalizeEvaluation(selectedTeam.evaluation).strengths} emptyText="No strengths returned" tone="emerald" />
-                                                </div>
-                                                <div className="rounded-3xl border border-rose-500/10 bg-rose-500/5 p-5">
-                                                    <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-rose-300 mb-3">Weaknesses</h4>
-                                                    <ArrayChips items={normalizeEvaluation(selectedTeam.evaluation).weaknesses} emptyText="No weaknesses returned" tone="rose" />
-                                                </div>
-                                            </div>
-
-                                            <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-4 mb-6">
-                                                <div className="rounded-3xl border border-white/8 bg-white/[0.03] p-5">
-                                                    <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-slate-400 mb-3">AI Summary</h4>
-                                                    <p className="text-[12px] md:text-[13px] text-slate-200 leading-relaxed font-medium">
-                                                        {normalizeEvaluation(selectedTeam.evaluation).summary || 'No summary returned by the AI.'}
-                                                    </p>
-                                                </div>
-
-                                                <div className="rounded-3xl border border-white/8 bg-white/[0.03] p-5">
-                                                    <div className="flex items-center justify-between mb-3">
-                                                        <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-slate-400">Top Squad View</h4>
-                                                        <button
-                                                            onClick={handleShareTeamCard}
-                                                            disabled={isSharing}
-                                                            className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest border border-white/10 bg-white/5 hover:bg-white/10 transition-all ${isSharing ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                                        >
-                                                            Share
-                                                        </button>
-                                                    </div>
-                                                    <div className="max-h-[320px] overflow-y-auto custom-scrollbar grid grid-cols-1 gap-2 pr-1">
-                                                        {(selectedTeam.playersAcquired || []).map((entry, idx) => (
-                                                            <div
-                                                                key={entry.player?._id || entry.player || idx}
-                                                                className="flex items-center justify-between px-3 py-2.5 rounded-xl bg-white/3 border border-white/5 hover:bg-white/5 transition-colors"
+                                                        <div className="flex items-center gap-2">
+                                                            {selectedTeam.evaluation?.customLineupApplied && (
+                                                                <span className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[9px] font-black uppercase tracking-wider text-emerald-300">
+                                                                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                                                    Custom XI Evaluated
+                                                                </span>
+                                                            )}
+                                                            <button
+                                                                onClick={() => setShowCustomLineupModal(true)}
+                                                                className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500/20 via-orange-500/20 to-purple-500/20 hover:from-amber-500/30 hover:via-orange-500/30 hover:to-purple-500/30 border border-amber-500/40 hover:border-amber-400/60 text-amber-200 hover:text-white text-[10px] font-black uppercase tracking-wider transition-all duration-300 shadow-[0_0_15px_rgba(245,158,11,0.15)] hover:scale-[1.02]"
                                                             >
-                                                                <div className="flex items-center gap-2.5 min-w-0">
-                                                                    <div className="w-7 h-7 rounded-full bg-white/5 flex items-center justify-center font-black text-[9px] text-slate-500 border border-white/5 shrink-0">
-                                                                        {idx + 1}
-                                                                    </div>
-                                                                    <div className="text-[11px] font-bold text-white truncate max-w-[180px]">
-                                                                        {entry.name || (entry.player && allPlayersMap[entry.player]) || (entry.player?.name) || (allPlayersMap[entry.player?._id]) || "Unknown Player"}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="text-[10px] font-mono font-black text-slate-400">{fmt(entry.boughtFor)}</div>
-                                                            </div>
-                                                        ))}
+                                                                <Sliders className="w-3.5 h-3.5 text-amber-400" />
+                                                                <span>Customize XI & Re-Evaluate</span>
+                                                            </button>
+                                                        </div>
                                                     </div>
                                                 </div>
-                                            </div>
-                                        </motion.div>
-                                    ) : null}
+
+                                                {/* ─── Metric Pills Row ─── */}
+                                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                                    <InfoCard label="Squad Balance" value={`${evalData.squadMetrics?.balance_score ?? evalData.rating}/100`} accent="#34d399" />
+                                                    <InfoCard label="Star Power" value={`${evalData.squadMetrics?.star_power_score ?? evalData.rating}/100`} accent="#f59e0b" />
+                                                    <InfoCard label="Playing XI" value={`${evalData.playingXi.length} Starters`} accent="#60a5fa" />
+                                                    <InfoCard label="Bench Depth" value={`${evalData.squadMetrics?.bench_depth_score ?? 70}/100`} accent="#a78bfa" />
+                                                </div>
+
+                                                {/* ─── AUCTION VALUATION CORNER (Steal Buy, Best Buy, Worst/Overpriced Buy) ─── */}
+                                                {(evalData.stealOfAuction || evalData.bestBuy || evalData.worstBuy) && (
+                                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                                        {evalData.stealOfAuction && (
+                                                            <div className="rounded-3xl border border-emerald-500/25 bg-emerald-500/5 p-4 flex flex-col justify-between">
+                                                                <div>
+                                                                    <div className="flex items-center justify-between mb-2">
+                                                                        <div className="flex items-center gap-1.5 text-emerald-400 text-[9px] font-black uppercase tracking-widest">
+                                                                            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                                                                            Steal of Auction
+                                                                        </div>
+                                                                        {evalData.stealOfAuction.price && (
+                                                                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-[9px] font-mono font-black text-emerald-300">
+                                                                                {evalData.stealOfAuction.price}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="text-sm font-black text-white">{evalData.stealOfAuction.player}</div>
+                                                                    {evalData.stealOfAuction.rationale && (
+                                                                        <p className="text-[11px] text-emerald-200/80 font-medium mt-1 leading-snug">
+                                                                            {evalData.stealOfAuction.rationale}
+                                                                        </p>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {evalData.bestBuy && (
+                                                            <div className="rounded-3xl border border-amber-500/25 bg-amber-500/5 p-4 flex flex-col justify-between">
+                                                                <div>
+                                                                    <div className="flex items-center justify-between mb-2">
+                                                                        <div className="flex items-center gap-1.5 text-amber-400 text-[9px] font-black uppercase tracking-widest">
+                                                                            <Award className="w-3.5 h-3.5 text-amber-400" />
+                                                                            Cornerstone Signing
+                                                                        </div>
+                                                                        {evalData.bestBuy.price && (
+                                                                            <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-[9px] font-mono font-black text-amber-300">
+                                                                                {evalData.bestBuy.price}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="text-sm font-black text-white">{evalData.bestBuy.player}</div>
+                                                                    {evalData.bestBuy.rationale && (
+                                                                        <p className="text-[11px] text-amber-200/80 font-medium mt-1 leading-snug">
+                                                                            {evalData.bestBuy.rationale}
+                                                                        </p>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {evalData.worstBuy && (
+                                                            <div className="rounded-3xl border border-rose-500/25 bg-rose-500/5 p-4 flex flex-col justify-between">
+                                                                <div>
+                                                                    <div className="flex items-center justify-between mb-2">
+                                                                        <div className="flex items-center gap-1.5 text-rose-400 text-[9px] font-black uppercase tracking-widest">
+                                                                            <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                                                                            Overpriced / Risk Buy
+                                                                        </div>
+                                                                        {evalData.worstBuy.price && (
+                                                                            <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-[9px] font-mono font-black text-rose-300">
+                                                                                {evalData.worstBuy.price}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="text-sm font-black text-white">{evalData.worstBuy.player}</div>
+                                                                    {evalData.worstBuy.rationale && (
+                                                                        <p className="text-[11px] text-rose-200/80 font-medium mt-1 leading-snug">
+                                                                            {evalData.worstBuy.rationale}
+                                                                        </p>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* ─── MATCH PHASE RATINGS (0-10) ─── */}
+                                                {evalData.phaseRatings && (
+                                                    <div className="rounded-3xl border border-white/8 bg-white/[0.03] p-5">
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <h4 className="text-[10px] font-black uppercase tracking-[0.35em] text-slate-300 flex items-center gap-2">
+                                                                <Flame className="w-4 h-4 text-orange-400" />
+                                                                Match Phase Execution Ratings (0–10)
+                                                            </h4>
+                                                            <span className="text-[8px] font-black uppercase tracking-widest text-slate-500">20-Over Breakdown</span>
+                                                        </div>
+                                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                                            <div className="rounded-2xl border border-blue-500/15 bg-blue-500/5 p-4">
+                                                                <div className="flex justify-between items-center mb-1.5">
+                                                                    <span className="text-[9px] font-black uppercase tracking-widest text-blue-300">Powerplay (Overs 1–6)</span>
+                                                                    <span className="text-xs font-black font-mono text-blue-400">{evalData.phaseRatings.powerplay?.score ?? '—'}/10</span>
+                                                                </div>
+                                                                <div className="h-1.5 rounded-full bg-white/5 overflow-hidden mb-2">
+                                                                    <div className="h-full rounded-full bg-blue-400" style={{ width: `${(evalData.phaseRatings.powerplay?.score || 0) * 10}%` }} />
+                                                                </div>
+                                                                <p className="text-[11px] text-slate-300 leading-relaxed font-medium">
+                                                                    {evalData.phaseRatings.powerplay?.analysis || 'Solid top-order intent and new-ball swing.'}
+                                                                </p>
+                                                            </div>
+
+                                                            <div className="rounded-2xl border border-purple-500/15 bg-purple-500/5 p-4">
+                                                                <div className="flex justify-between items-center mb-1.5">
+                                                                    <span className="text-[9px] font-black uppercase tracking-widest text-purple-300">Middle Overs (Overs 7–15)</span>
+                                                                    <span className="text-xs font-black font-mono text-purple-400">{evalData.phaseRatings.middle_overs?.score ?? '—'}/10</span>
+                                                                </div>
+                                                                <div className="h-1.5 rounded-full bg-white/5 overflow-hidden mb-2">
+                                                                    <div className="h-full rounded-full bg-purple-400" style={{ width: `${(evalData.phaseRatings.middle_overs?.score || 0) * 10}%` }} />
+                                                                </div>
+                                                                <p className="text-[11px] text-slate-300 leading-relaxed font-medium">
+                                                                    {evalData.phaseRatings.middle_overs?.analysis || 'Spin strangle and strike rotation control.'}
+                                                                </p>
+                                                            </div>
+
+                                                            <div className="rounded-2xl border border-rose-500/15 bg-rose-500/5 p-4">
+                                                                <div className="flex justify-between items-center mb-1.5">
+                                                                    <span className="text-[9px] font-black uppercase tracking-widest text-rose-300">Death Overs (Overs 16–20)</span>
+                                                                    <span className="text-xs font-black font-mono text-rose-400">{evalData.phaseRatings.death_overs?.score ?? '—'}/10</span>
+                                                                </div>
+                                                                <div className="h-1.5 rounded-full bg-white/5 overflow-hidden mb-2">
+                                                                    <div className="h-full rounded-full bg-rose-400" style={{ width: `${(evalData.phaseRatings.death_overs?.score || 0) * 10}%` }} />
+                                                                </div>
+                                                                <p className="text-[11px] text-slate-300 leading-relaxed font-medium">
+                                                                    {evalData.phaseRatings.death_overs?.analysis || 'Boundary hitting & death yorker execution.'}
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* ─── BENCH STRENGTH & LIKE-FOR-LIKE REPLACEMENTS ─── */}
+                                                {evalData.benchReplacements && evalData.benchReplacements.length > 0 && (
+                                                    <div className="rounded-3xl border border-indigo-500/20 bg-indigo-500/5 p-5">
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <div className="flex items-center gap-2">
+                                                                <ShieldCheck className="w-4 h-4 text-indigo-400" />
+                                                                <div>
+                                                                    <h4 className="text-[10px] font-black uppercase tracking-[0.35em] text-indigo-300">Bench Strength & Like-for-Like Replacements</h4>
+                                                                    <p className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Injury Resilience & Depth Audit</p>
+                                                                </div>
+                                                            </div>
+                                                            <span className="text-[8px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+                                                                {evalData.benchReplacements.length} Scenarios Analyzed
+                                                            </span>
+                                                        </div>
+
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                            {evalData.benchReplacements.map((item, idx) => {
+                                                                const isElite = item.coverage_quality === 'Elite';
+                                                                const isVulnerable = item.coverage_quality === 'Vulnerable';
+                                                                const badgeBg = isElite
+                                                                    ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                                                                    : isVulnerable
+                                                                        ? 'bg-rose-500/15 border-rose-500/30 text-rose-300'
+                                                                        : 'bg-amber-500/15 border-amber-500/30 text-amber-300';
+
+                                                                return (
+                                                                    <div key={idx} className="rounded-2xl border border-white/5 bg-white/[0.02] p-3.5 hover:bg-white/[0.04] transition-colors">
+                                                                        <div className="flex items-center justify-between gap-2 mb-2">
+                                                                            <div className="flex items-center gap-1.5 min-w-0">
+                                                                                <span className="text-xs font-black text-white truncate">{item.primary_player}</span>
+                                                                                <ArrowRight className="w-3 h-3 text-slate-500 shrink-0" />
+                                                                                <span className="text-xs font-bold text-slate-300 truncate">{item.backup_player}</span>
+                                                                            </div>
+                                                                            <span className={`px-2 py-0.5 rounded-full border text-[8px] font-black uppercase tracking-wider shrink-0 ${badgeBg}`}>
+                                                                                {item.coverage_quality} Cover
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="text-[9px] font-bold text-indigo-400 uppercase tracking-wider mb-1">
+                                                                            Role: {item.role}
+                                                                        </div>
+                                                                        <p className="text-[11px] text-slate-300 font-medium leading-snug">
+                                                                            {item.tactical_impact}
+                                                                        </p>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* ─── Playing XI & Impact Substitutes ─── */}
+                                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                                    <div className="rounded-3xl border border-blue-500/10 bg-blue-500/5 p-5">
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-blue-300">Playing XI</h4>
+                                                            <span className="text-[8px] font-black uppercase tracking-[0.3em] text-blue-300/40">Best Starting 11</span>
+                                                        </div>
+                                                        <ArrayChips items={evalData.playingXi} emptyText="No playing XI returned" tone="sky" />
+                                                    </div>
+
+                                                    <div className="rounded-3xl border border-violet-500/10 bg-violet-500/5 p-5">
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-violet-300">Substitutes & Impact Subs</h4>
+                                                            <span className="text-[8px] font-black uppercase tracking-[0.3em] text-violet-300/40">Bench Reserves</span>
+                                                        </div>
+                                                        <ArrayChips items={evalData.substitutes} emptyText="No substitutes returned" tone="violet" />
+                                                    </div>
+                                                </div>
+
+                                                {/* ─── Strengths & Weaknesses ─── */}
+                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                    <div className="rounded-3xl border border-emerald-500/10 bg-emerald-500/5 p-5">
+                                                        <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-emerald-300 mb-3 flex items-center gap-1.5">
+                                                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                                                            Tactical Strengths
+                                                        </h4>
+                                                        <ArrayChips items={evalData.strengths} emptyText="No strengths returned" tone="emerald" />
+                                                    </div>
+                                                    <div className="rounded-3xl border border-rose-500/10 bg-rose-500/5 p-5">
+                                                        <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-rose-300 mb-3 flex items-center gap-1.5">
+                                                            <AlertOctagon className="w-3.5 h-3.5 text-rose-400" />
+                                                            Tactical Weaknesses
+                                                        </h4>
+                                                        <ArrayChips items={evalData.weaknesses} emptyText="No weaknesses returned" tone="rose" />
+                                                    </div>
+                                                </div>
+
+                                                {/* ─── Missing Roles & Pitch Adaptability (if any) ─── */}
+                                                {(evalData.missingRoles.length > 0 || evalData.pitchSuitability?.verdict) && (
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                        {evalData.missingRoles.length > 0 && (
+                                                            <div className="rounded-3xl border border-amber-500/15 bg-amber-500/5 p-5">
+                                                                <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-amber-300 mb-3">
+                                                                    Unaddressed Squad Gaps / Missing Roles
+                                                                </h4>
+                                                                <ArrayChips items={evalData.missingRoles} emptyText="No missing roles" tone="amber" />
+                                                            </div>
+                                                        )}
+                                                        {evalData.pitchSuitability && (
+                                                            <div className="rounded-3xl border border-white/8 bg-white/[0.03] p-5">
+                                                                <div className="flex justify-between items-center mb-2">
+                                                                    <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-slate-300">
+                                                                        Home Pitch Adaptability ({evalData.pitchSuitability.home_ground})
+                                                                    </h4>
+                                                                    <span className="text-[10px] font-mono font-black text-amber-300">
+                                                                        {evalData.pitchSuitability.suitability_score}/10
+                                                                    </span>
+                                                                </div>
+                                                                <p className="text-[11px] text-slate-300 font-medium leading-relaxed">
+                                                                    {evalData.pitchSuitability.verdict}
+                                                                </p>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* ─── FULL-FLEDGED BROAD AI SCOUT REPORT ─── */}
+                                                <div className="grid grid-cols-1 lg:grid-cols-[1.2fr_0.8fr] gap-4">
+                                                    <div className="rounded-3xl border border-white/10 bg-white/[0.03] p-6 flex flex-col justify-between">
+                                                        <div>
+                                                            <div className="flex items-center justify-between mb-4 border-b border-white/5 pb-3">
+                                                                <div className="flex items-center gap-2">
+                                                                    <Brain className="w-4 h-4 text-purple-400" />
+                                                                    <h4 className="text-[10px] font-black uppercase tracking-[0.35em] text-white">Full-Fledged AI Scout Verdict</h4>
+                                                                </div>
+                                                                <span className="text-[8px] font-black uppercase tracking-widest text-slate-500">Comprehensive Scout Analysis</span>
+                                                            </div>
+
+                                                            <div className="space-y-4">
+                                                                {summaryParas.length > 0 ? (
+                                                                    summaryParas.map((para, pIdx) => {
+                                                                        const isLast = pIdx === summaryParas.length - 1;
+                                                                        if (isLast && summaryParas.length >= 3) {
+                                                                            return (
+                                                                                <div key={pIdx} className="rounded-2xl border border-yellow-500/20 bg-yellow-500/5 p-4 mt-2">
+                                                                                    <div className="text-[8px] font-black uppercase tracking-widest text-yellow-400 mb-1">
+                                                                                        🎙️ TV Pundit Takeaway
+                                                                                    </div>
+                                                                                    <p className="text-xs sm:text-[13px] text-yellow-100 font-bold italic leading-relaxed">
+                                                                                        "{para}"
+                                                                                    </p>
+                                                                                </div>
+                                                                            );
+                                                                        }
+                                                                        return (
+                                                                            <p key={pIdx} className="text-xs sm:text-[13px] text-slate-200 leading-relaxed font-normal">
+                                                                                {para}
+                                                                            </p>
+                                                                        );
+                                                                    })
+                                                                ) : (
+                                                                    <p className="text-xs text-slate-400">No detailed summary available.</p>
+                                                                )}
+                                                            </div>
+                                                        </div>
+
+                                                        {evalData.tournamentProjection && (
+                                                            <div className="flex flex-wrap items-center justify-between gap-3 mt-6 pt-4 border-t border-white/5 text-[9px] font-black uppercase tracking-widest text-slate-400">
+                                                                <div>Playoff Probability: <span className="text-emerald-400 font-mono text-[11px] ml-1">{evalData.tournamentProjection.playoff_probability || 'N/A'}</span></div>
+                                                                <div>Title Outlook: <span className="text-amber-300 font-mono text-[11px] ml-1">{evalData.tournamentProjection.title_odds || 'Competitive'}</span></div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Top Squad View with Prices */}
+                                                    <div className="rounded-3xl border border-white/8 bg-white/[0.03] p-5 flex flex-col justify-between">
+                                                        <div>
+                                                            <div className="flex items-center justify-between mb-3 border-b border-white/5 pb-2">
+                                                                <h4 className="text-[9px] font-black uppercase tracking-[0.35em] text-slate-400">Squad Roster ({selectedTeam.playersAcquired?.length || 0})</h4>
+                                                                <div className="flex items-center gap-2">
+                                                                    <button
+                                                                        onClick={() => setShowCustomLineupModal(true)}
+                                                                        className="px-2.5 py-1 rounded-xl text-[9px] font-black uppercase tracking-wider border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 transition-all flex items-center gap-1"
+                                                                    >
+                                                                        <Sliders className="w-3 h-3 text-amber-400" />
+                                                                        Custom XI
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={handleShareTeamCard}
+                                                                        disabled={isSharing}
+                                                                        className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest border border-white/10 bg-white/5 hover:bg-white/10 transition-all ${isSharing ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                                                    >
+                                                                        Share Card
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                            <div className="max-h-[380px] overflow-y-auto custom-scrollbar grid grid-cols-1 gap-2 pr-1">
+                                                                {(selectedTeam.playersAcquired || []).map((entry, idx) => (
+                                                                    <div
+                                                                        key={entry.player?._id || entry.player || idx}
+                                                                        className="flex items-center justify-between px-3 py-2 rounded-xl bg-white/3 border border-white/5 hover:bg-white/5 transition-colors"
+                                                                    >
+                                                                        <div className="flex items-center gap-2.5 min-w-0">
+                                                                            <div className="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center font-black text-[9px] text-slate-500 border border-white/5 shrink-0">
+                                                                                {idx + 1}
+                                                                            </div>
+                                                                            <div className="text-[11px] font-bold text-white truncate max-w-[150px]">
+                                                                                {entry.name || (entry.player && allPlayersMap[entry.player]) || (entry.player?.name) || (allPlayersMap[entry.player?._id]) || "Unknown Player"}
+                                                                            </div>
+                                                                        </div>
+                                                                        <div className="text-[10px] font-mono font-black text-slate-400">{fmt(entry.boughtFor)}</div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </motion.div>
+                                        );
+                                    })() : null}
                                 </AnimatePresence>
                             </div>
                         </div>
                     );
                 })()}
             </div>
+
+            {/* Custom Lineup & Bench Selection Modal */}
+            <CustomLineupModal
+                isOpen={showCustomLineupModal}
+                onClose={() => setShowCustomLineupModal(false)}
+                team={selectedTeam}
+                roomCode={roomCode}
+                league={league}
+                currency={roomCurrency}
+                allPlayersMap={allPlayersMap}
+                onEvaluationUpdated={(updatedTeam, allTeams) => {
+                    if (allTeams && allTeams.length) {
+                        setResults(allTeams);
+                    }
+                    if (updatedTeam) {
+                        setSelectedTeam(updatedTeam);
+                    }
+                    setToast({
+                        type: 'success',
+                        message: `Lineup Re-Evaluated! New AI Score: ${updatedTeam?.evaluation?.overallScore ?? updatedTeam?.evaluation?.rating}/100`
+                    });
+                }}
+            />
 
             <Toast message={toast?.message} type={toast?.type} onClose={() => setToast(null)} />
         </div>

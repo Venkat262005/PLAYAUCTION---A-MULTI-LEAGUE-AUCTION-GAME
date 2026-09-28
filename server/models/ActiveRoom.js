@@ -43,7 +43,7 @@ const activeRoomSchema = new mongoose.Schema({
     
     auctionStatus: { 
         type: String, 
-        enum: ["Lobby", "ONGOING", "PAUSED", "SOLD", "Selection", "Finished", "RTM"], 
+        enum: ["Lobby", "ONGOING", "PAUSED", "SOLD", "Selection", "Finished", "RTM", "Wildcard"], 
         default: "Lobby" 
     },
     

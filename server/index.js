@@ -17,7 +17,7 @@ process.on('unhandledRejection', (reason) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Load env vars
-dotenv.config();
+dotenv.config({ path: require('path').join(__dirname, '.env') });
 
 // Connect to database and start server
 const startServer = async () => {
@@ -76,6 +76,7 @@ const { startPeriodicFlush } = require('./services/dbWriter');
 const apiRoutes = require('./routes/api');
 const sessionRoutes = require('./routes/session');
 const adminRoutes = require('./routes/admin');
+const changeRequestRoutes = require('./routes/changeRequests');
 
 // Setup Socket.io
 const io = new Server(server, {
@@ -112,6 +113,7 @@ setupSocketHandlers(io);
 app.use('/api', apiRoutes);
 app.use('/api/session', sessionRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/admin/change-requests', changeRequestRoutes);
 
 app.get('/', (req, res) => {
     res.send('IPL Auction Server API is running');
@@ -143,3 +145,4 @@ setInterval(() => {
 startServer();
 
 module.exports = { io };
+// Trigger restart for new .env

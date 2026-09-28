@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const { MongoClient } = require('mongodb');
 const Player = require('../models/Player');
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 
 const ATLAS_URI = process.env.MONGO_URI;
 const LOCAL_URI = process.env.MONGO_URI;

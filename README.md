@@ -74,24 +74,26 @@ auctiononline/
 │   │   ├── ipl_logos/             # IPL franchise logos (15 teams)
 │   │   ├── sa20_logos/            # SA20 franchise logos (6 teams)
 │   │   ├── wpl_logos/             # WPL franchise logos (5 teams)
+│   │   ├── game_logos/            # Role and status icons
+│   │   ├── flags/                 # National & league flags
 │   │   ├── sounds/                # Auction sound effects
 │   │   ├── Auction-bg.mp4         # Splash screen background video
-│   │   ├── Ascension_of_the_Dawn.mp4  # Ambient background music
-│   │   ├── role-bowler.png        # Bowler role icon
-│   │   └── role-wk.png            # Wicket-keeper role icon
+│   │   └── Ascension_of_the_Dawn.mp4  # Ambient background music
 │   ├── quiz/                      # Quiz question sets (IPL, WPL, SA20 .txt files)
 │   └── src/
 │       ├── components/
 │       │   ├── Admin/             # Admin-specific UI components
 │       │   ├── immersive/         # SplashScreen, ImmersiveWrapper, AnimatedBackground, etc.
 │       │   ├── AuctionSubComponents.jsx  # Bid panel, player card, team panel
+│       │   ├── CustomLineupModal.jsx     # Playing 11 customization modal
 │       │   ├── FeedbackWidget.jsx
 │       │   ├── GavelSlam.jsx
 │       │   ├── GlobalResultCard.jsx
-│       │   ├── QuizOverlay.jsx
+│       │   ├── LeagueNewsMarquee.jsx
 │       │   ├── TeamShareCard.jsx
 │       │   ├── Toast.jsx
-│       │   └── VoiceControls.jsx
+│       │   ├── VoiceControls.jsx
+│       │   └── WildcardDraftCenter.jsx
 │       ├── context/
 │       │   ├── SessionContext.jsx  # User session & room state
 │       │   ├── SocketContext.jsx   # Socket.io connection
@@ -111,6 +113,7 @@ auctiononline/
 │           ├── legendConfig.js     # Legend player configuration
 │           ├── playerUtils.js      # Currency conversion, player helpers
 │           ├── soundEngine.js      # Audio playback engine
+│           ├── teamLogos.js        # Franchise logo resolution helper
 │           └── teamSlogans.js      # Team slogans for UI
 │
 └── server/                        # Backend Express + Socket.io server
@@ -119,16 +122,17 @@ auctiononline/
     ├── models/
     │   ├── ActiveRoom.js          # In-progress auction room state
     │   ├── Admin.js               # Admin user model
-    │   ├── AuctionRoom.js         # Legacy auction room model
+    │   ├── AuctionRoom.js         # Auction room persistence model
     │   ├── AuctionTransaction.js  # Bid transaction records
+    │   ├── ChangeRequest.js       # Admin change request tracking
     │   ├── CompletedRoom.js       # Archived finished rooms
     │   ├── Feedback.js            # User feedback submissions
     │   ├── Franchise.js           # Franchise/team data
-    │   ├── Player.js              # Player document model
-    │   └── Room.js                # Base room model
+    │   └── Player.js              # Player document model
     ├── routes/
     │   ├── api.js                 # Public API endpoints (players, rooms)
     │   ├── admin.js               # Admin-only protected endpoints
+    │   ├── changeRequests.js      # Change proposal workflow endpoints
     │   └── session.js             # Session management endpoints
     ├── scripts/
     │   ├── check_ai_status.js     # Verify Gemini/Groq AI connectivity
@@ -136,8 +140,6 @@ auctiononline/
     │   └── seedAdmin.js           # Seed default admin credentials
     ├── seed/                      # Database seed scripts
     ├── services/
-    │   ├── AIQueue.js             # Serialized AI request queue
-    │   ├── DBBatchedWriter.js     # Batched DB write scheduler
     │   ├── aiRating.js            # AI squad rating & Playing 11 selection
     │   ├── auctionCleanup.js      # Stagnant room cleanup service
     │   ├── dbWriter.js            # Periodic dirty-room flusher
@@ -153,10 +155,12 @@ auctiononline/
         ├── Validation.js          # Input validation helpers
         ├── adminHelpers.js        # Admin utility functions
         ├── bidRules.js            # Server-side bid increment & snap logic
+        ├── diffHelper.js          # Object diffing utility for change requests
         ├── legendRules.js         # Legend player detection rules
         ├── playerNormalizer.js    # Normalize player data across leagues
         ├── quizHelpers.js         # Quiz question formatting helpers
-        └── sa20PlayerRules.js     # SA20-specific player eligibility rules
+        ├── sa20PlayerRules.js     # SA20-specific player eligibility rules
+        └── teamLogos.js           # Server-side team logo mapping
 ```
 
 ---

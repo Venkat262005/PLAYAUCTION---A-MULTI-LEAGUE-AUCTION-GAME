@@ -143,11 +143,8 @@ class PlayerCache {
     deletePlayer(id, poolName) {
         const idStr = String(id);
         this.playersMap.delete(idStr);
-        if (poolName && this.pools[poolName]) {
-            this.pools[poolName] = this.pools[poolName].filter(pid => String(pid) !== idStr);
-        } else {
-            // Remove from all pools
-            for (const pName in this.pools) {
+        for (const pName in this.pools) {
+            if (!poolName || pName === poolName || pName.endsWith(`_${poolName}`)) {
                 this.pools[pName] = this.pools[pName].filter(pid => String(pid) !== idStr);
             }
         }

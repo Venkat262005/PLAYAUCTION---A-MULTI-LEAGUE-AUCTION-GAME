@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80" width="120" height="80">
+  <!-- Maroon Background -->
+  <rect width="120" height="80" fill="#7A0026" rx="4"/>
+  <!-- Gold Outer Ring Accent -->
+  <circle cx="60" cy="40" r="28" fill="#FDB813" opacity="0.15"/>
+  <circle cx="60" cy="40" r="26" fill="none" stroke="#FDB813" stroke-width="1.5"/>
+  
+  <!-- Rising Sun -->
+  <path d="M45,42 A15,15 0 0,1 75,42 Z" fill="#FDB813"/>
+  <circle cx="60" cy="38" r="6" fill="#FDB813"/>
+  <!-- Sun Rays -->
+  <path d="M60,26 L60,29 M50,30 L52,32 M70,30 L68,32 M44,38 L47,38 M76,38 L73,38" stroke="#FDB813" stroke-width="1.2" stroke-linecap="round"/>
+  
+  <!-- Green Island Mound -->
+  <ellipse cx="60" cy="54" rx="22" ry="7" fill="#1B6D36"/>
+  
+  <!-- Palm Tree Trunk & Fronds -->
+  <!-- Trunk -->
+  <path d="M57,53 Q59,42 61,32" stroke="#8B4513" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <!-- Fronds -->
+  <path d="M61,32 Q54,26 48,29 Q55,31 61,32" fill="#2E8B57"/>
+  <path d="M61,32 Q60,22 56,23 Q59,28 61,32" fill="#2E8B57"/>
+  <path d="M61,32 Q65,22 69,24 Q65,28 61,32" fill="#2E8B57"/>
+  <path d="M61,32 Q70,27 75,31 Q68,32 61,32" fill="#2E8B57"/>
+  <path d="M61,32 Q64,36 71,37 Q66,35 61,32" fill="#2E8B57"/>
+  
+  <!-- Cricket Stumps and Bails -->
+  <!-- Three Stumps -->
+  <rect x="52" y="45" width="1.2" height="9" fill="#FFFFFF"/>
+  <rect x="55" y="45" width="1.2" height="9" fill="#FFFFFF"/>
+  <rect x="58" y="45" width="1.2" height="9" fill="#FFFFFF"/>
+  <!-- Bails -->
+  <rect x="51.5" y="44" width="8.2" height="1" fill="#FFFFFF" rx="0.5"/>
+  
+  <!-- Subtle Border -->
+  <rect x="0.5" y="0.5" width="119" height="79" fill="none" stroke="#FDB813" stroke-width="1" stroke-opacity="0.5" rx="3.5"/>
+</svg>

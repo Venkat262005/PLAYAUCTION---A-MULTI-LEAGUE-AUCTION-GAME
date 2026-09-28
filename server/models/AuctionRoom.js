@@ -6,7 +6,7 @@ const auctionRoomSchema = new mongoose.Schema({
     hostSocketId: { type: String }, // For legacy engine reference
     hostUserId: { type: String },   // Permanent secure host identifier
     coHostUserIds: [{ type: String }], // Up to 3 co-hosts
-    status: { type: String, enum: ["Lobby", "Auctioning", "Selection", "Finished"], default: "Lobby" },
+    status: { type: String, enum: ["Lobby", "Auctioning", "Selection", "Finished", "Wildcard"], default: "Lobby" },
     purseLimit: { type: Number, default: 12000 },
     isAiMode: { type: Boolean, default: false },
     league: { type: String, default: 'ipl' }, // [NEW] Track active league

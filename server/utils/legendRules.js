@@ -13,11 +13,9 @@ const SA20_LEGEND_KEYS = new Set([
     'fafduplessis',
     'davidmiller',
     'heinrichklaasen',
-    'heinrichklassen',
     'quintondekock',
     'kagisorabada',
     'aidenmarkram',
-    'willjacks',
 ]);
 
 const isLegendPlayer = (playerName, league) => {

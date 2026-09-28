@@ -36,15 +36,22 @@ const EvaluationLobby = () => {
         const onFinished = ({ teams, quizLeaderboard }) => {
             navigate(`/results/${roomCode}`, { state: { finalTeams: teams, quizLeaderboard } });
         };
+        const onRoomJoined = ({ state }) => {
+            if (state && state.status === 'Finished') {
+                navigate(`/results/${roomCode}`, { state: { finalTeams: state.teams, quizLeaderboard: state.quizLeaderboard } });
+            }
+        };
 
         socket.on('evaluation_started', onEvalStart);
         socket.on('evaluation_timer_tick', onEvalTick);
         socket.on('auction_finished', onFinished);
+        socket.on('room_joined', onRoomJoined);
 
         return () => {
             socket.off('evaluation_started', onEvalStart);
             socket.off('evaluation_timer_tick', onEvalTick);
             socket.off('auction_finished', onFinished);
+            socket.off('room_joined', onRoomJoined);
         };
     }, [socket, roomCode, navigate]);
 

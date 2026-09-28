@@ -65,6 +65,16 @@ const QuizArena = () => {
             setCurrentQuestion(null);
         };
 
+        const onFinished = ({ teams, quizLeaderboard }) => {
+            navigate(`/results/${roomCode}`, { state: { finalTeams: teams, quizLeaderboard } });
+        };
+
+        const onRoomJoined = ({ state }) => {
+            if (state && state.status === 'Finished') {
+                navigate(`/results/${roomCode}`, { state: { finalTeams: state.teams, quizLeaderboard: state.quizLeaderboard } });
+            }
+        };
+
         socket.on('quiz_phase_started', onQuizStart);
         socket.on('quiz_question', onQuestion);
         socket.on('quiz_timer_tick', onTimerTick);
@@ -72,6 +82,8 @@ const QuizArena = () => {
         socket.on('quiz_answer_result', onAnswerResult);
         socket.on('quiz_question_closed', onQuestionClosed);
         socket.on('quiz_phase_ended', onQuizEnded);
+        socket.on('auction_finished', onFinished);
+        socket.on('room_joined', onRoomJoined);
 
         return () => {
             socket.off('quiz_phase_started', onQuizStart);
@@ -81,8 +93,10 @@ const QuizArena = () => {
             socket.off('quiz_answer_result', onAnswerResult);
             socket.off('quiz_question_closed', onQuestionClosed);
             socket.off('quiz_phase_ended', onQuizEnded);
+            socket.off('auction_finished', onFinished);
+            socket.off('room_joined', onRoomJoined);
         };
-    }, [socket, roomCode]);
+    }, [socket, roomCode, navigate]);
 
     useEffect(() => {
         if (!socket || !roomCode) return;

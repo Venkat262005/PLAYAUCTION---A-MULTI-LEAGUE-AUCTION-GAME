@@ -13,6 +13,11 @@ const playerSchema = new mongoose.Schema({
   image_path: { type: String },
   points: { type: Number, default: 0 },
   poolName: { type: String },
+  position: { type: String },
+  batting_position: { type: String },
+  bowling_type: { type: String },
+  batting_style: { type: String },
+  bowling_style: { type: String },
   stats: {
     matches: { type: Number, default: 0 },
     runs: { type: Number, default: 0 },

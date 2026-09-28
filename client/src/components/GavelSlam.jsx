@@ -2,7 +2,7 @@ import React, { useEffect } from 'react';
 import { motion } from 'framer-motion';
 import confetti from 'canvas-confetti';
 import { playCustomSlam } from '../utils/soundEngine';
-import { fmtCr } from '../utils/playerUtils';
+import { fmtCr, LEAGUE_DEFAULTS } from '../utils/playerUtils';
 
 /**
  * Sold / unsold stamp — designed to occupy the exact timer column slot.
@@ -17,11 +17,12 @@ const GavelSlam = ({
     winningBid,
     playerImage,
     currency = 'inr',
+    league = 'ipl',
 }) => {
     const isSold = type === 'SOLD';
     const accent = isSold ? (teamColor || '#D4AF37') : '#8B7355';
     const displayName = playerName ? playerName.toUpperCase() : 'PLAYER';
-    const priceLabel = isSold ? fmtCr(winningBid?.amount || 0, currency) : null;
+    const priceLabel = isSold ? fmtCr(winningBid?.amount || 0, currency, LEAGUE_DEFAULTS[league] || 'inr') : null;
     const teamShort = teamName ? teamName.split(' ').pop()?.toUpperCase() : '';
 
     useEffect(() => {

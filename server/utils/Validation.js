@@ -42,13 +42,13 @@ const validateBid = (state, team, amount) => {
     }
 
     // 5. Squad Limit Guard
-    const maxSquad = state && state.league === 'wpl' ? 18 : (state && state.league === 'sa20' ? 19 : 25);
+    const maxSquad = state && state.league === 'wpl' ? 18 : (state && state.league === 'sa20' ? 20 : 25);
     if (team.playersAcquired.length >= maxSquad) {
         return { valid: false, error: `Squad limit reached (max ${maxSquad})` };
     }
 
     // 6. Overseas Guard
-    const maxOverseas = state && state.league === 'wpl' ? 6 : (state && state.league === 'sa20' ? 7 : 8);
+    const maxOverseas = state && state.league === 'wpl' ? 8 : (state && state.league === 'sa20' ? 7 : 8);
     if (currentPlayer.isOverseas && (team.overseasCount || 0) >= maxOverseas) {
         return { valid: false, error: `Overseas player limit (${maxOverseas}) reached` };
     }

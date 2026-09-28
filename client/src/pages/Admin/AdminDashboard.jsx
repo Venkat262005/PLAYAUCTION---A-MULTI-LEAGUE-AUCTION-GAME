@@ -9,9 +9,19 @@ import {
     ChevronRight, ArrowRightLeft, Activity,
     Eye, ChevronDown, List, Terminal, Upload,
     MessageSquare,
-    FileSpreadsheet
+    FileSpreadsheet,
+    GitPullRequest,
+    Shield
 } from 'lucide-react';
 import MongoExplorer from '../../components/Admin/MongoExplorer';
+import ChangeRequestManager from '../../components/Admin/ChangeRequestManager';
+import StaffManager from '../../components/Admin/StaffManager';
+import {
+    getPlayerBattingPosition,
+    getPlayerBowlingType,
+    getPlayerBattingStyle,
+    getPlayerBowlingStyle
+} from '../../utils/playerUtils';
 
 const getPlayerLabel = (p) => {
     if (!p) return 'Unknown';
@@ -23,6 +33,19 @@ const getPlayerLabel = (p) => {
 
 const getPlayerImage = (p) =>
     p?.image_path || p?.photoUrl || p?.image_url || p?.imagepath || p?.image || '';
+
+const normalizeFrontendPlayerRole = (role) => {
+    if (!role) return 'Batsman';
+    const lowerRole = role.toLowerCase();
+    if (lowerRole.includes('keeper') || lowerRole.includes('wk')) return 'Wicketkeeper';
+    if (lowerRole.includes('spin') && (lowerRole.includes('all') || lowerRole.includes('ar') || lowerRole.includes('rounder'))) return 'Spin Bowling Allrounder';
+    if ((lowerRole.includes('pace') || lowerRole.includes('fast') || lowerRole.includes('medium')) && (lowerRole.includes('all') || lowerRole.includes('ar') || lowerRole.includes('rounder'))) return 'Pace Bowling Allrounder';
+    if (lowerRole.includes('all') || lowerRole.includes('ar') || lowerRole.includes('rounder')) return 'All-Rounder';
+    if (lowerRole.includes('spin')) return 'Spin Bowler';
+    if (lowerRole.includes('fast') || lowerRole.includes('pace') || lowerRole.includes('medium')) return 'Fast Bowler';
+    if (lowerRole.includes('bowl')) return 'Bowler';
+    return 'Batsman';
+};
 
 const AdminDashboard = () => {
     const [view, setView] = useState('registry'); // 'registry' or 'infrastructure'
@@ -56,34 +79,73 @@ const AdminDashboard = () => {
     const [feedbackItems, setFeedbackItems] = useState([]);
     const [feedbackFilter, setFeedbackFilter] = useState('new');
     const [isFetchingFeedback, setIsFetchingFeedback] = useState(false);
+    const [isAddingField, setIsAddingField] = useState(false);
+    const [newFieldName, setNewFieldName] = useState('');
     
+    // User Role, Concurrency & Staging States
+    const [userRole, setUserRole] = useState(localStorage.getItem('adminRole') || 'admin');
+    const [currentUsername, setCurrentUsername] = useState(localStorage.getItem('adminUser') || '');
+    const [pendingChangesCount, setPendingChangesCount] = useState(0);
+    const [activeDraft, setActiveDraft] = useState(null);
+    const [originalSelectedPlayer, setOriginalSelectedPlayer] = useState(null);
+
     const navigate = useNavigate();
     const token = localStorage.getItem('adminToken');
     const API_URL = import.meta.env.VITE_API_URL || '';
     const searchTimerRef = useRef(null);
 
-    useEffect(() => {
-        if (!token) {
-            navigate('/admin/login');
-            return;
+    const fetchProfile = async () => {
+        if (!token) return;
+        try {
+            const res = await fetch(`${API_URL}/api/admin/me`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await res.json();
+            if (res.ok) {
+                const role = data.role || 'admin';
+                setUserRole(role);
+                setCurrentUsername(data.username);
+                localStorage.setItem('adminRole', role);
+                localStorage.setItem('adminUser', data.username);
+            }
+        } catch (err) {
+            console.error('Failed to verify profile:', err);
         }
-        fetchStats();
-        fetchDatabases();
-    }, [token, navigate]);
+    };
 
-    useEffect(() => {
-        if (selectedDb) {
-            fetchStats();
-            fetchCollections(selectedDb);
-            setSearchQuery('');
-            setPlayers([]);
-            setSelectedPlayer(null);
+    const fetchChangeStats = async () => {
+        if (!token) return;
+        try {
+            const res = await fetch(`${API_URL}/api/admin/change-requests/stats`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await res.json();
+            if (res.ok) {
+                setPendingChangesCount(data.pendingCount || 0);
+                if (data.userRole) {
+                    setUserRole(data.userRole);
+                    localStorage.setItem('adminRole', data.userRole);
+                }
+            }
+        } catch (err) {
+            console.error('Failed to fetch change request stats:', err);
         }
-    }, [selectedDb]);
+    };
 
-    useEffect(() => {
-        if (view === 'feedback') fetchFeedback();
-    }, [view, fetchFeedback]);
+    const fetchActiveDraft = async () => {
+        if (!token) return;
+        try {
+            const res = await fetch(`${API_URL}/api/admin/change-requests/active-draft`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const data = await res.json();
+            if (res.ok) {
+                setActiveDraft(data);
+            }
+        } catch (err) {
+            console.error('Failed to fetch active draft:', err);
+        }
+    };
 
     const fetchStats = async () => {
         setIsFetchingStats(true);
@@ -229,6 +291,32 @@ const AdminDashboard = () => {
         }
     }, [API_URL, feedbackFilter, token]);
 
+    useEffect(() => {
+        if (!token) {
+            navigate('/admin/login');
+            return;
+        }
+        fetchProfile();
+        fetchStats();
+        fetchDatabases();
+        fetchChangeStats();
+        fetchActiveDraft();
+    }, [token, navigate]);
+
+    useEffect(() => {
+        if (selectedDb) {
+            fetchStats();
+            fetchCollections(selectedDb);
+            setSearchQuery('');
+            setPlayers([]);
+            setSelectedPlayer(null);
+        }
+    }, [selectedDb]);
+
+    useEffect(() => {
+        if (view === 'feedback') fetchFeedback();
+    }, [view, fetchFeedback]);
+
     const updateFeedbackStatus = async (id, status) => {
         try {
             const res = await fetch(`${API_URL}/api/admin/feedback/${id}`, {
@@ -315,16 +403,20 @@ const AdminDashboard = () => {
         if (!window.confirm('Delete this document? This action is irreversible.')) return;
         setIsProcessing(true);
         try {
-            const res = await fetch(`${API_URL}/api/admin/data/delete?dbName=${selectedDb}&collectionName=${viewingCollection}&id=${id}`, {
+            const rawId = typeof id === 'object' && id !== null ? (id.$oid || id.toString()) : id;
+            const res = await fetch(`${API_URL}/api/admin/data/delete?dbName=${encodeURIComponent(selectedDb)}&collectionName=${encodeURIComponent(viewingCollection)}&id=${encodeURIComponent(rawId)}`, {
                 method: 'DELETE',
                 headers: { 'Authorization': `Bearer ${token}` }
             });
+            const data = await res.json().catch(() => ({}));
             if (res.ok) {
-                setMessage({ type: 'success', text: 'Document deleted' });
+                setMessage({ type: 'success', text: data.message || 'Document deleted' });
                 fetchCollectionData(viewingCollection);
+            } else {
+                setMessage({ type: 'error', text: data.error || 'Deletion failed' });
             }
         } catch (err) {
-            setMessage({ type: 'error', text: 'Deletion failed' });
+            setMessage({ type: 'error', text: 'Deletion failed: ' + err.message });
         } finally {
             setIsProcessing(false);
         }
@@ -585,6 +677,58 @@ const AdminDashboard = () => {
     const handleUpdatePlayer = async (e) => {
         e.preventDefault();
         setIsProcessing(true);
+
+        if (userRole === 'editor') {
+            try {
+                let draftId = activeDraft?._id;
+                if (!draftId) {
+                    const draftRes = await fetch(`${API_URL}/api/admin/change-requests/active-draft`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    const draftData = await draftRes.json();
+                    draftId = draftData._id;
+                    setActiveDraft(draftData);
+                }
+
+                const pid = selectedPlayer.playerId || selectedPlayer.id || selectedPlayer._id;
+                const coll = selectedPlayer.poolName || (searchCollection !== '__all__' ? searchCollection : playerPools[0]) || 'ipl_data';
+
+                const res = await fetch(`${API_URL}/api/admin/change-requests/${draftId}/stage`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        actionType: 'UPDATE',
+                        playerId: String(pid),
+                        targetDocId: selectedPlayer._id ? String(selectedPlayer._id) : undefined,
+                        playerName: getPlayerLabel(selectedPlayer),
+                        targetDb: selectedDb,
+                        targetCollection: coll,
+                        originalData: originalSelectedPlayer || selectedPlayer,
+                        proposedData: selectedPlayer
+                    })
+                });
+
+                const data = await res.json();
+                if (res.ok) {
+                    setMessage({ type: 'success', text: `✨ Updates staged for "${getPlayerLabel(selectedPlayer)}"! Submit via Changes tab.` });
+                    setSelectedPlayer(null);
+                    setOriginalSelectedPlayer(null);
+                    fetchActiveDraft();
+                    fetchChangeStats();
+                } else {
+                    setMessage({ type: 'error', text: data.error || 'Failed to stage updates' });
+                }
+            } catch (err) {
+                setMessage({ type: 'error', text: 'Error staging updates: ' + err.message });
+            } finally {
+                setIsProcessing(false);
+            }
+            return;
+        }
+
         try {
             const res = await fetch(`${API_URL}/api/admin/players/update`, {
                 method: 'POST',
@@ -603,6 +747,7 @@ const AdminDashboard = () => {
             if (res.ok) {
                 setMessage({ type: 'success', text: 'Player updated across all registries' });
                 setSelectedPlayer(null);
+                setOriginalSelectedPlayer(null);
                 setSearchQuery('');
                 setPlayers([]);
                 fetchStats();
@@ -617,9 +762,60 @@ const AdminDashboard = () => {
     };
 
     const handleDeletePlayer = async () => {
-        if (!window.confirm(`Permanently delete ${getPlayerLabel(selectedPlayer)}?`)) return;
+        const pName = getPlayerLabel(selectedPlayer);
         const pid = selectedPlayer.playerId || selectedPlayer.id || selectedPlayer._id;
-        const coll = selectedPlayer.poolName || (searchCollection !== '__all__' ? searchCollection : playerPools[0]);
+        const coll = selectedPlayer.poolName || (searchCollection !== '__all__' ? searchCollection : playerPools[0]) || 'ipl_data';
+
+        if (userRole === 'editor') {
+            if (!window.confirm(`Stage player "${pName}" for deletion in your active draft?`)) return;
+            setIsProcessing(true);
+            try {
+                let draftId = activeDraft?._id;
+                if (!draftId) {
+                    const draftRes = await fetch(`${API_URL}/api/admin/change-requests/active-draft`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    const draftData = await draftRes.json();
+                    draftId = draftData._id;
+                    setActiveDraft(draftData);
+                }
+
+                const res = await fetch(`${API_URL}/api/admin/change-requests/${draftId}/stage`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        actionType: 'DELETE',
+                        playerId: String(pid),
+                        targetDocId: selectedPlayer._id ? String(selectedPlayer._id) : undefined,
+                        playerName: pName,
+                        targetDb: selectedDb,
+                        targetCollection: coll,
+                        originalData: selectedPlayer
+                    })
+                });
+
+                const data = await res.json();
+                if (res.ok) {
+                    setMessage({ type: 'success', text: `🗑️ Deletion staged for "${pName}" in your draft!` });
+                    setSelectedPlayer(null);
+                    setOriginalSelectedPlayer(null);
+                    fetchActiveDraft();
+                    fetchChangeStats();
+                } else {
+                    setMessage({ type: 'error', text: data.error || 'Failed to stage deletion' });
+                }
+            } catch (err) {
+                setMessage({ type: 'error', text: 'Error staging deletion: ' + err.message });
+            } finally {
+                setIsProcessing(false);
+            }
+            return;
+        }
+
+        if (!window.confirm(`Permanently delete ${getPlayerLabel(selectedPlayer)}?`)) return;
         if (!coll) {
             setMessage({ type: 'error', text: 'Could not determine player collection' });
             return;
@@ -630,13 +826,18 @@ const AdminDashboard = () => {
                 `${API_URL}/api/admin/players/${encodeURIComponent(pid)}?currentDb=${encodeURIComponent(selectedDb)}&currentCollection=${encodeURIComponent(coll)}`,
                 { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
             );
+            const data = await res.json().catch(() => ({}));
             if (res.ok) {
-                setMessage({ type: 'success', text: 'Player removed from database' });
+                setMessage({ type: 'success', text: data.message || 'Player removed from database' });
                 setSelectedPlayer(null);
+                setOriginalSelectedPlayer(null);
+                setPlayers(prev => prev.filter(p => String(p.playerId || p.id || p._id) !== String(pid)));
                 fetchStats();
+            } else {
+                setMessage({ type: 'error', text: data.error || 'Deletion failed' });
             }
         } catch (err) {
-            setMessage({ type: 'error', text: 'Deletion failed' });
+            setMessage({ type: 'error', text: 'Deletion failed: ' + err.message });
         } finally {
             setIsProcessing(false);
         }
@@ -661,7 +862,7 @@ const AdminDashboard = () => {
                     toCollection: targetColl
                 })
             });
-            const data = await res.json();
+            const data = await res.json().catch(() => ({}));
             if (res.ok) {
                 setMessage({ type: 'success', text: data.message });
                 setSelectedPlayer({ ...selectedPlayer, poolName: targetColl });
@@ -678,14 +879,25 @@ const AdminDashboard = () => {
     const handleCreatePlayer = async (e) => {
         e.preventDefault();
         const formData = new FormData(e.target);
+        const role = formData.get('role');
+        const bPos = formData.get('batting_position') || '';
+        const bType = formData.get('bowling_type') || '';
+        const bStyle = formData.get('batting_style') || '';
+        const bowlStyle = formData.get('bowling_style') || '';
+
         const player = {
             playerId: formData.get('playerId'),
             name: formData.get('name'),
             player: formData.get('name'),
-            role: formData.get('role'),
+            role: role,
             basePrice: Number(formData.get('basePrice')),
             image_path: formData.get('image_path'),
             poolName: formData.get('targetCollection'),
+            batting_position: bPos,
+            position: bPos,
+            bowling_type: bType,
+            batting_style: bStyle,
+            bowling_style: bowlStyle,
             stats: {
                 matches: Number(formData.get('matches') || 0),
                 runs: Number(formData.get('runs') || 0),
@@ -693,6 +905,52 @@ const AdminDashboard = () => {
             }
         };
         const targetCollection = formData.get('targetCollection');
+
+        if (userRole === 'editor') {
+            setIsProcessing(true);
+            try {
+                let draftId = activeDraft?._id;
+                if (!draftId) {
+                    const draftRes = await fetch(`${API_URL}/api/admin/change-requests/active-draft`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    const draftData = await draftRes.json();
+                    draftId = draftData._id;
+                    setActiveDraft(draftData);
+                }
+
+                const res = await fetch(`${API_URL}/api/admin/change-requests/${draftId}/stage`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        actionType: 'CREATE',
+                        playerId: player.playerId,
+                        playerName: player.name,
+                        targetDb: selectedDb,
+                        targetCollection: targetCollection || 'ipl_data',
+                        proposedData: player
+                    })
+                });
+
+                const data = await res.json();
+                if (res.ok) {
+                    setMessage({ type: 'success', text: `✨ Player "${player.name}" staged for creation in draft! Submit via Changes tab.` });
+                    setShowCreateModal(false);
+                    fetchActiveDraft();
+                    fetchChangeStats();
+                } else {
+                    setMessage({ type: 'error', text: data.error || 'Failed to stage player creation' });
+                }
+            } catch (err) {
+                setMessage({ type: 'error', text: 'Error staging player creation: ' + err.message });
+            } finally {
+                setIsProcessing(false);
+            }
+            return;
+        }
 
         setIsProcessing(true);
         try {
@@ -704,13 +962,16 @@ const AdminDashboard = () => {
                 },
                 body: JSON.stringify({ player, targetDb: selectedDb, targetCollection })
             });
+            const data = await res.json().catch(() => ({}));
             if (res.ok) {
-                setMessage({ type: 'success', text: 'New player deployed to database' });
+                setMessage({ type: 'success', text: data.message || 'New player deployed to database' });
                 setShowCreateModal(false);
                 fetchStats();
+            } else {
+                setMessage({ type: 'error', text: data.error || 'Deployment failed' });
             }
         } catch (err) {
-            setMessage({ type: 'error', text: 'Deployment failed' });
+            setMessage({ type: 'error', text: 'Deployment failed: ' + err.message });
         } finally {
             setIsProcessing(false);
         }
@@ -732,6 +993,16 @@ const AdminDashboard = () => {
                 
                 <nav className="flex flex-col gap-6">
                     <NavBtn active={view === 'registry'} onClick={() => setView('registry')} icon={<Users className="w-6 h-6" />} label="Players" />
+                    <NavBtn 
+                        active={view === 'changes'} 
+                        onClick={() => setView('changes')} 
+                        icon={<GitPullRequest className="w-6 h-6" />} 
+                        label="Changes" 
+                        badge={pendingChangesCount > 0 ? pendingChangesCount : null} 
+                    />
+                    {userRole !== 'editor' && (
+                        <NavBtn active={view === 'staff'} onClick={() => setView('staff')} icon={<Shield className="w-6 h-6" />} label="Staff" />
+                    )}
                     <NavBtn active={view === 'feedback'} onClick={() => setView('feedback')} icon={<MessageSquare className="w-6 h-6" />} label="Feedback" />
                     <NavBtn active={view === 'infrastructure'} onClick={() => setView('infrastructure')} icon={<Database className="w-6 h-6" />} label="Data" />
                     <NavBtn active={false} onClick={fetchStats} icon={<Activity className="w-6 h-6" />} label="Health" />
@@ -750,7 +1021,7 @@ const AdminDashboard = () => {
                     <div className="flex items-center gap-6">
                         <div>
                             <h1 className="text-2xl font-black tracking-tight flex items-center gap-2">
-                                {view === 'registry' ? 'Player Protocol' : 'MongoDB Explorer'}
+                                {view === 'registry' ? 'Player Protocol' : view === 'changes' ? 'Change Proposals & Staging' : view === 'staff' ? 'Staff Operations' : view === 'feedback' ? 'User Feedback' : 'MongoDB Explorer'}
                                 <ChevronRight className="w-5 h-5 text-gray-700" />
                                 <span className="text-yellow-500 uppercase text-xs tracking-widest bg-yellow-500/10 px-3 py-1 rounded-full">{selectedDb}</span>
                             </h1>
@@ -759,6 +1030,19 @@ const AdminDashboard = () => {
                     </div>
 
                     <div className="flex items-center gap-3">
+                        {/* User Identity Pill */}
+                        <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded-xl">
+                            <div className={`w-2 h-2 rounded-full ${userRole === 'editor' ? 'bg-blue-400' : 'bg-yellow-400'}`} />
+                            <span className="text-xs font-bold text-white">{currentUsername || 'User'}</span>
+                            <span className={`text-[9px] uppercase font-black px-2 py-0.5 rounded-md ${
+                                userRole === 'editor'
+                                    ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                                    : 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
+                            }`}>
+                                {userRole === 'editor' ? 'Editor' : 'Admin'}
+                            </span>
+                        </div>
+
                         <div className="flex items-center gap-1.5 bg-white/5 border border-white/10 rounded-xl px-2 py-1">
                             <select 
                                 value={selectedDb}
@@ -768,22 +1052,26 @@ const AdminDashboard = () => {
                                 {databases.map(db => <option key={db} value={db} className="bg-neutral-900 text-white">{db.toUpperCase()}</option>)}
                             </select>
                             
-                            <button 
-                                onClick={handleCreateDb}
-                                title="Create New Database"
-                                className="p-1 hover:bg-white/10 text-yellow-500 rounded-lg transition-colors flex items-center justify-center"
-                            >
-                                <Plus className="w-3.5 h-3.5" />
-                            </button>
+                            {userRole !== 'editor' && (
+                                <>
+                                    <button 
+                                        onClick={handleCreateDb}
+                                        title="Create New Database"
+                                        className="p-1 hover:bg-white/10 text-yellow-500 rounded-lg transition-colors flex items-center justify-center"
+                                    >
+                                        <Plus className="w-3.5 h-3.5" />
+                                    </button>
 
-                            {!['ipl', 'admin', 'local', 'config'].includes(selectedDb.toLowerCase()) && (
-                                <button 
-                                    onClick={handleDropDb}
-                                    title="Drop Selected Database"
-                                    className="p-1 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors flex items-center justify-center"
-                                >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                                    {!['ipl', 'admin', 'local', 'config'].includes(selectedDb.toLowerCase()) && (
+                                        <button 
+                                            onClick={handleDropDb}
+                                            title="Drop Selected Database"
+                                            className="p-1 hover:bg-red-500/20 text-red-500 rounded-lg transition-colors flex items-center justify-center"
+                                        >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                    )}
+                                </>
                             )}
                         </div>
                         <div className="flex items-center gap-2 px-4 py-2 bg-white/5 rounded-full border border-white/10">
@@ -795,7 +1083,24 @@ const AdminDashboard = () => {
 
                 <div className="p-8 space-y-8">
                     {/* View Controller */}
-                    {view === 'feedback' ? (
+                    {view === 'changes' ? (
+                        <ChangeRequestManager 
+                            token={token}
+                            API_URL={API_URL}
+                            userRole={userRole}
+                            currentUser={currentUsername}
+                            onActiveDraftUpdated={() => {
+                                fetchChangeStats();
+                                fetchActiveDraft();
+                            }}
+                        />
+                    ) : view === 'staff' ? (
+                        <StaffManager
+                            token={token}
+                            API_URL={API_URL}
+                            currentUsername={currentUsername}
+                        />
+                    ) : view === 'feedback' ? (
                         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                                 <div>
@@ -869,6 +1174,36 @@ const AdminDashboard = () => {
                         </div>
                     ) : view === 'registry' ? (
                         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
+                            {/* Editor Staging Workspace Banner */}
+                            {userRole === 'editor' && (
+                                <div className="bg-gradient-to-r from-blue-500/10 via-indigo-500/10 to-purple-500/10 border border-blue-500/30 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
+                                    <div className="flex items-center gap-3">
+                                        <span className="p-2.5 bg-blue-500/20 text-blue-400 rounded-xl">
+                                            <GitPullRequest className="w-5 h-5" />
+                                        </span>
+                                        <div>
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-xs uppercase tracking-wider font-bold text-blue-400">Editor Staging Workspace Active</span>
+                                                <span className="text-xs text-gray-500">•</span>
+                                                <span className="text-xs font-semibold text-white">{activeDraft?.title || 'Current Working Draft'}</span>
+                                            </div>
+                                            <p className="text-xs text-gray-400 mt-0.5">
+                                                Any changes or player additions will be staged into this draft for Admin review.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => setView('changes')}
+                                            className="flex items-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-400 text-black font-bold text-xs rounded-xl shadow-lg shadow-blue-500/20 transition-all"
+                                        >
+                                            <span>Inspect Staged Draft ({activeDraft?.items?.length || 0})</span>
+                                            <ChevronRight className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
                             {/* Stats Grid */}
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                                 <StatCard 
@@ -952,33 +1287,65 @@ const AdminDashboard = () => {
                                                             exit={{ opacity: 0, y: 10 }}
                                                             className="absolute top-full left-0 right-0 bg-[#1c1c22] border border-white/10 rounded-[2rem] mt-4 overflow-hidden z-20 shadow-3xl max-h-[400px] overflow-y-auto custom-scrollbar"
                                                         >
-                                                            {players.map((p, idx) => (
-                                                                <div 
-                                                                    key={`${p._id}-${p.poolName || idx}`}
-                                                                    onClick={() => { setSelectedPlayer({ ...p, poolName: p.poolName || searchCollection }); setPlayers([]); }}
-                                                                    className="p-5 hover:bg-yellow-500/10 cursor-pointer flex items-center justify-between border-b border-white/5 last:border-0 group/item transition-colors"
-                                                                >
-                                                                    <div className="flex items-center gap-5">
-                                                                        <img src={getPlayerImage(p)} alt="" className="w-14 h-14 rounded-2xl object-cover bg-black border border-white/10" onError={(e) => { e.target.style.display = 'none'; }} />
-                                                                        <div>
-                                                                            <div className="font-bold text-lg group-hover/item:text-yellow-500 transition-colors">{getPlayerLabel(p)}</div>
-                                                                            <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
-                                                                                <span className="bg-white/5 px-2 py-0.5 rounded uppercase font-bold">{p.role || p.Role || p.Specialism || '—'}</span>
-                                                                                {p.poolName && (
-                                                                                    <span className="bg-yellow-500/10 text-yellow-500/80 px-2 py-0.5 rounded uppercase font-bold text-[10px]">{p.poolName}</span>
-                                                                                )}
-                                                                                {(p.playerId || p.id) && (
-                                                                                    <span className="text-yellow-500/50 font-mono">#{p.playerId || p.id}</span>
-                                                                                )}
+                                                            {players.map((p, idx) => {
+                                                                const roleVal = p.role || p.Role || p.Specialism || 'Batsman';
+                                                                const normRole = normalizeFrontendPlayerRole(roleVal);
+                                                                const battingPos = getPlayerBattingPosition(p);
+                                                                const bowlingType = getPlayerBowlingType(p);
+                                                                const battingStyle = getPlayerBattingStyle(p);
+                                                                const bowlingStyle = getPlayerBowlingStyle(p);
+
+                                                                return (
+                                                                    <div 
+                                                                        key={`${p._id}-${p.poolName || idx}`}
+                                                                        onClick={() => {
+                                                                            const selectedNormalized = {
+                                                                                ...p,
+                                                                                role: normRole,
+                                                                                poolName: p.poolName || searchCollection,
+                                                                                batting_position: battingPos,
+                                                                                position: battingPos,
+                                                                                bowling_type: bowlingType,
+                                                                                batting_style: battingStyle,
+                                                                                bowling_style: bowlingStyle,
+                                                                            };
+                                                                            setSelectedPlayer(selectedNormalized);
+                                                                            setOriginalSelectedPlayer(JSON.parse(JSON.stringify(selectedNormalized)));
+                                                                            setPlayers([]);
+                                                                        }}
+                                                                        className="p-5 hover:bg-yellow-500/10 cursor-pointer flex items-center justify-between border-b border-white/5 last:border-0 group/item transition-colors"
+                                                                    >
+                                                                        <div className="flex items-center gap-5">
+                                                                            <img src={getPlayerImage(p)} alt="" className="w-14 h-14 rounded-2xl object-cover bg-black border border-white/10" onError={(e) => { e.target.style.display = 'none'; }} />
+                                                                            <div>
+                                                                                <div className="font-bold text-lg group-hover/item:text-yellow-500 transition-colors">{getPlayerLabel(p)}</div>
+                                                                                <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500 mt-1">
+                                                                                    <span className="bg-white/5 px-2 py-0.5 rounded uppercase font-bold text-[11px] text-gray-300">{p.role || p.Role || p.Specialism || '—'}</span>
+                                                                                    {battingPos && (
+                                                                                        <span className="bg-blue-500/15 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded font-bold text-[10px] uppercase tracking-wide">{battingPos}</span>
+                                                                                    )}
+                                                                                    {bowlingType && (
+                                                                                        <span className="bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded font-bold text-[10px] uppercase tracking-wide">{bowlingType}</span>
+                                                                                    )}
+                                                                                    {battingStyle && (
+                                                                                        <span className="bg-purple-500/15 text-purple-300 border border-purple-500/30 px-2 py-0.5 rounded font-bold text-[10px] uppercase tracking-wide">{battingStyle}</span>
+                                                                                    )}
+                                                                                    {p.poolName && (
+                                                                                        <span className="bg-yellow-500/10 text-yellow-500/80 px-2 py-0.5 rounded uppercase font-bold text-[10px]">{p.poolName}</span>
+                                                                                    )}
+                                                                                    {(p.playerId || p.id) && (
+                                                                                        <span className="text-yellow-500/50 font-mono text-[11px]">#{p.playerId || p.id}</span>
+                                                                                    )}
+                                                                                </div>
                                                                             </div>
                                                                         </div>
+                                                                        <div className="text-right shrink-0 ml-4">
+                                                                            <div className="text-lg font-black text-yellow-500">{p.basePrice} L</div>
+                                                                            <div className="text-[10px] text-gray-500 uppercase font-black tracking-tighter">Market Val</div>
+                                                                        </div>
                                                                     </div>
-                                                                    <div className="text-right">
-                                                                        <div className="text-lg font-black text-yellow-500">{p.basePrice} L</div>
-                                                                        <div className="text-[10px] text-gray-500 uppercase font-black tracking-tighter">Market Val</div>
-                                                                    </div>
-                                                                </div>
-                                                            ))}
+                                                                );
+                                                            })}
                                                         </motion.div>
                                                     )}
                                                 </AnimatePresence>
@@ -1015,16 +1382,93 @@ const AdminDashboard = () => {
                                                                     >
                                                                         <option value="Batsman">Batsman</option>
                                                                         <option value="Bowler">Bowler</option>
+                                                                        <option value="Spin Bowler">Spin Bowler</option>
+                                                                        <option value="Fast Bowler">Fast Bowler</option>
                                                                         <option value="All-Rounder">All-Rounder</option>
+                                                                        <option value="Spin Bowling Allrounder">Spin Bowling Allrounder</option>
+                                                                        <option value="Pace Bowling Allrounder">Pace Bowling Allrounder</option>
                                                                         <option value="Wicketkeeper">Wicketkeeper</option>
                                                                     </select>
+                                                                </Field>
+                                                                <Field label="Batting Position" icon={<Activity className="w-4 h-4" />}>
+                                                                    <select 
+                                                                        value={selectedPlayer.batting_position || selectedPlayer.position || ''}
+                                                                        onChange={(e) => {
+                                                                            const next = { ...selectedPlayer, batting_position: e.target.value };
+                                                                            delete next.position;
+                                                                            delete next['batting position'];
+                                                                            delete next.battingPosition;
+                                                                            setSelectedPlayer(next);
+                                                                        }}
+                                                                        className="w-full bg-transparent outline-none font-bold text-lg text-blue-400 appearance-none cursor-pointer"
+                                                                    >
+                                                                        <option value="">— Not Specified —</option>
+                                                                        <option value="Top Order">Top Order (1-3)</option>
+                                                                        <option value="Middle Order">Middle Order (4-5)</option>
+                                                                        <option value="Finisher">Finisher (6-7)</option>
+                                                                        <option value="Lower Order">Lower Order (8-11)</option>
+                                                                    </select>
+                                                                </Field>
+                                                                <Field label="Bowling Type" icon={<Activity className="w-4 h-4" />}>
+                                                                    <select 
+                                                                        value={selectedPlayer.bowling_type || ''}
+                                                                        onChange={(e) => {
+                                                                            const next = { ...selectedPlayer, bowling_type: e.target.value };
+                                                                            delete next['bowling type'];
+                                                                            delete next.bowlingType;
+                                                                            setSelectedPlayer(next);
+                                                                        }}
+                                                                        className="w-full bg-transparent outline-none font-bold text-lg text-emerald-400 appearance-none cursor-pointer"
+                                                                    >
+                                                                        <option value="">— Not Specified —</option>
+                                                                        <option value="Pace">Pace</option>
+                                                                        <option value="Spin">Spin</option>
+                                                                        <option value="None">None</option>
+                                                                    </select>
+                                                                </Field>
+                                                                <Field label="Batting Style" icon={<User className="w-4 h-4" />}>
+                                                                    <select 
+                                                                        value={selectedPlayer.batting_style || ''}
+                                                                        onChange={(e) => {
+                                                                            const next = { ...selectedPlayer, batting_style: e.target.value };
+                                                                            delete next['batting style'];
+                                                                            delete next.battingStyle;
+                                                                            setSelectedPlayer(next);
+                                                                        }}
+                                                                        className="w-full bg-transparent outline-none font-bold text-lg text-purple-300 appearance-none cursor-pointer"
+                                                                    >
+                                                                        <option value="">— Not Specified —</option>
+                                                                        <option value="Right Handed">Right Handed (RHB)</option>
+                                                                        <option value="Left Handed">Left Handed (LHB)</option>
+                                                                    </select>
+                                                                </Field>
+                                                                <Field label="Bowling Style (Arm & Technique)" icon={<Layers className="w-4 h-4" />}>
+                                                                    <input 
+                                                                        type="text"
+                                                                        value={selectedPlayer.bowling_style || ''}
+                                                                        onChange={(e) => {
+                                                                            const next = { ...selectedPlayer, bowling_style: e.target.value };
+                                                                            delete next['bowling style'];
+                                                                            delete next.bowlingStyle;
+                                                                            setSelectedPlayer(next);
+                                                                        }}
+                                                                        className="w-full bg-transparent outline-none font-bold text-sm text-gray-200 placeholder-gray-600"
+                                                                        placeholder="e.g. Right-arm fast, Left-arm orthodox"
+                                                                    />
                                                                 </Field>
                                                                 <div className="col-span-2">
                                                                     <Field label="Asset Visual URL" icon={<Image className="w-4 h-4" />}>
                                                                         <input 
                                                                             type="text"
                                                                             value={selectedPlayer.image_path || ''}
-                                                                            onChange={(e) => setSelectedPlayer({...selectedPlayer, image_path: e.target.value})}
+                                                                            onChange={(e) => {
+                                                                                const next = { ...selectedPlayer, image_path: e.target.value };
+                                                                                delete next.image;
+                                                                                delete next.image_url;
+                                                                                delete next.imagepath;
+                                                                                delete next.photoUrl;
+                                                                                setSelectedPlayer(next);
+                                                                            }}
                                                                             className="w-full bg-transparent outline-none font-mono text-xs text-gray-400"
                                                                         />
                                                                     </Field>
@@ -1032,13 +1476,85 @@ const AdminDashboard = () => {
                                                             </div>
 
                                                             <div className="pt-4 space-y-6">
-                                                                <div className="flex items-center gap-3">
-                                                                    <div className="w-2 h-6 bg-blue-500 rounded-full" />
-                                                                    <h3 className="text-sm font-black uppercase tracking-widest text-gray-400">Performance Matrix</h3>
+                                                                <div className="flex items-center justify-between">
+                                                                    <div className="flex items-center gap-3">
+                                                                        <div className="w-2 h-6 bg-blue-500 rounded-full" />
+                                                                        <h3 className="text-sm font-black uppercase tracking-widest text-gray-400">Performance Matrix</h3>
+                                                                    </div>
+                                                                    {isAddingField ? (
+                                                                        <div className="flex items-center gap-2">
+                                                                            <input
+                                                                                type="text"
+                                                                                placeholder="Field name..."
+                                                                                value={newFieldName}
+                                                                                onChange={(e) => setNewFieldName(e.target.value)}
+                                                                                className="bg-black/50 border border-white/10 rounded-lg px-2.5 py-1 text-xs outline-none focus:border-yellow-500/50 w-28 text-white font-bold"
+                                                                                onKeyDown={(e) => {
+                                                                                    if (e.key === 'Enter') {
+                                                                                        e.preventDefault();
+                                                                                        const cleanKey = newFieldName.trim().replace(/\s+/g, '_').toLowerCase();
+                                                                                        if (!cleanKey) return;
+                                                                                        if (selectedPlayer[cleanKey] !== undefined) {
+                                                                                            alert("Field already exists!");
+                                                                                            return;
+                                                                                        }
+                                                                                        setSelectedPlayer({ ...selectedPlayer, [cleanKey]: "" });
+                                                                                        setIsAddingField(false);
+                                                                                        setNewFieldName('');
+                                                                                    } else if (e.key === 'Escape') {
+                                                                                        setIsAddingField(false);
+                                                                                        setNewFieldName('');
+                                                                                    }
+                                                                                }}
+                                                                                autoFocus
+                                                                            />
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => {
+                                                                                    const cleanKey = newFieldName.trim().replace(/\s+/g, '_').toLowerCase();
+                                                                                    if (!cleanKey) return;
+                                                                                    if (selectedPlayer[cleanKey] !== undefined) {
+                                                                                        alert("Field already exists!");
+                                                                                        return;
+                                                                                    }
+                                                                                    setSelectedPlayer({ ...selectedPlayer, [cleanKey]: "" });
+                                                                                    setIsAddingField(false);
+                                                                                    setNewFieldName('');
+                                                                                }}
+                                                                                className="px-2 py-1 bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-500 rounded text-[10px] font-black uppercase tracking-wider"
+                                                                            >
+                                                                                Save
+                                                                            </button>
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => {
+                                                                                    setIsAddingField(false);
+                                                                                    setNewFieldName('');
+                                                                                }}
+                                                                                className="px-2 py-1 bg-white/5 hover:bg-white/10 text-gray-400 rounded text-[10px] font-black uppercase tracking-wider"
+                                                                            >
+                                                                                Cancel
+                                                                            </button>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => setIsAddingField(true)}
+                                                                            className="px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-xs font-bold text-gray-400 hover:text-white flex items-center gap-1.5 transition-colors"
+                                                                        >
+                                                                            <Plus className="w-3.5 h-3.5" /> ADD FIELD
+                                                                        </button>
+                                                                    )}
                                                                 </div>
                                                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                                                     {Object.entries(selectedPlayer).map(([k, v]) => {
-                                                                        if (['_id', 'id', 'playerId', 'name', 'player', 'image_path', 'photoUrl', 'basePrice', 'role', 'poolName'].includes(k)) return null;
+                                                                        const ignoredKeys = [
+                                                                            '_id', 'id', 'playerid', 'name', 'player', 'image_path', 'photourl', 'image', 'imagepath', 'image_url',
+                                                                            'baseprice', 'role', 'specialism', 'poolname', 'position', 'batting_position', 
+                                                                            'batting position', 'battingposition', 'bowling_type', 'bowling type', 'bowlingtype', 'batting_style', 
+                                                                            'batting style', 'battingstyle', 'bowling_style', 'bowling style', 'bowlingstyle', 'stats'
+                                                                        ];
+                                                                        if (ignoredKeys.includes(k.toLowerCase())) return null;
                                                                         return (
                                                                             <div key={k} className="bg-black/40 border border-white/5 rounded-2xl p-4 focus-within:border-yellow-500/50 focus-within:bg-black/60 transition-colors">
                                                                                 <div className="text-[10px] text-gray-500 uppercase font-black tracking-tighter mb-1 truncate">{k.replace(/_/g, ' ')}</div>
@@ -1062,15 +1578,20 @@ const AdminDashboard = () => {
                                                                 <button 
                                                                     type="submit"
                                                                     disabled={isProcessing}
-                                                                    className="flex-1 bg-gradient-to-r from-yellow-500 to-orange-600 hover:scale-[1.02] active:scale-[0.98] text-black font-black py-5 rounded-[2rem] shadow-xl shadow-orange-500/20 transition-all flex items-center justify-center gap-3 disabled:opacity-50"
+                                                                    className={`flex-1 hover:scale-[1.02] active:scale-[0.98] font-black py-5 rounded-[2rem] shadow-xl transition-all flex items-center justify-center gap-3 disabled:opacity-50 ${
+                                                                        userRole === 'editor'
+                                                                            ? 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white shadow-blue-500/20'
+                                                                            : 'bg-gradient-to-r from-yellow-500 to-orange-600 text-black shadow-orange-500/20'
+                                                                    }`}
                                                                 >
-                                                                    <Save className="w-6 h-6" />
-                                                                    COMMIT ASSET UPDATE
+                                                                    {userRole === 'editor' ? <GitPullRequest className="w-6 h-6" /> : <Save className="w-6 h-6" />}
+                                                                    {userRole === 'editor' ? 'STAGE PLAYER UPDATE' : 'COMMIT ASSET UPDATE'}
                                                                 </button>
                                                                 <button 
                                                                     type="button"
                                                                     onClick={handleDeletePlayer}
                                                                     disabled={isProcessing}
+                                                                    title={userRole === 'editor' ? 'Stage for Deletion' : 'Delete Player'}
                                                                     className="bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/20 px-8 rounded-[2rem] transition-all active:scale-95 disabled:opacity-50"
                                                                 >
                                                                     <Trash2 className="w-6 h-6" />
@@ -1089,14 +1610,32 @@ const AdminDashboard = () => {
                                                                         <h4 className="text-3xl font-black uppercase tracking-tight leading-none">{getPlayerLabel(selectedPlayer)}</h4>
                                                                     </div>
                                                                 </div>
-                                                                <div className="grid grid-cols-2 gap-8 border-t border-white/5 pt-8">
+                                                                <div className="grid grid-cols-2 gap-4 border-t border-white/5 pt-6">
                                                                     <div>
                                                                         <span className="text-[10px] text-gray-500 uppercase font-black tracking-widest">Base Value</span>
-                                                                        <div className="text-3xl font-black">{selectedPlayer.basePrice} L</div>
+                                                                        <div className="text-3xl font-black text-yellow-500">{selectedPlayer.basePrice} L</div>
                                                                     </div>
                                                                     <div className="text-right">
                                                                         <span className="text-[10px] text-gray-500 uppercase font-black tracking-widest">Pool</span>
-                                                                        <div className="text-sm font-bold text-yellow-500 uppercase">{selectedPlayer.poolName || 'MASTER'}</div>
+                                                                        <div className="text-sm font-bold text-yellow-500 uppercase truncate">{selectedPlayer.poolName || 'MASTER'}</div>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="grid grid-cols-2 gap-4 border-t border-white/5 pt-4 mt-2">
+                                                                    <div>
+                                                                        <span className="text-[9px] text-gray-500 uppercase font-black tracking-widest">Batting Position</span>
+                                                                        <div className="text-xs font-bold text-blue-400 mt-1">{selectedPlayer.batting_position || selectedPlayer.position || selectedPlayer['batting position'] || '—'}</div>
+                                                                    </div>
+                                                                    <div className="text-right">
+                                                                        <span className="text-[9px] text-gray-500 uppercase font-black tracking-widest">Bowling Type</span>
+                                                                        <div className="text-xs font-bold text-emerald-400 mt-1">{selectedPlayer.bowling_type || selectedPlayer['bowling type'] || '—'}</div>
+                                                                    </div>
+                                                                    <div>
+                                                                        <span className="text-[9px] text-gray-500 uppercase font-black tracking-widest">Batting Style</span>
+                                                                        <div className="text-xs font-bold text-purple-300 mt-1">{selectedPlayer.batting_style || selectedPlayer['batting style'] || '—'}</div>
+                                                                    </div>
+                                                                    <div className="text-right">
+                                                                        <span className="text-[9px] text-gray-500 uppercase font-black tracking-widest">Bowling Style</span>
+                                                                        <div className="text-xs font-bold text-gray-300 mt-1 truncate">{selectedPlayer.bowling_style || selectedPlayer['bowling style'] || '—'}</div>
                                                                     </div>
                                                                 </div>
                                                             </div>
@@ -1166,7 +1705,11 @@ const AdminDashboard = () => {
                                         <select name="role" className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none appearance-none cursor-pointer uppercase font-bold text-sm">
                                             <option value="Batsman">Batsman</option>
                                             <option value="Bowler">Bowler</option>
+                                            <option value="Spin Bowler">Spin Bowler</option>
+                                            <option value="Fast Bowler">Fast Bowler</option>
                                             <option value="All-Rounder">All-Rounder</option>
+                                            <option value="Spin Bowling Allrounder">Spin Bowling Allrounder</option>
+                                            <option value="Pace Bowling Allrounder">Pace Bowling Allrounder</option>
                                             <option value="Wicketkeeper">Wicketkeeper</option>
                                         </select>
                                     </div>
@@ -1181,9 +1724,70 @@ const AdminDashboard = () => {
                                             ))}
                                         </select>
                                     </div>
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] uppercase font-black text-gray-500 tracking-widest ml-1">Batting Position</label>
+                                        <select name="batting_position" className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none appearance-none cursor-pointer uppercase font-bold text-sm text-blue-400">
+                                            <option value="">— Select Position —</option>
+                                            <option value="Top Order">Top Order (1-3)</option>
+                                            <option value="Middle Order">Middle Order (4-5)</option>
+                                            <option value="Finisher">Finisher (6-7)</option>
+                                            <option value="Lower Order">Lower Order (8-11)</option>
+                                        </select>
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] uppercase font-black text-gray-500 tracking-widest ml-1">Bowling Type</label>
+                                        <select name="bowling_type" className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none appearance-none cursor-pointer uppercase font-bold text-sm text-emerald-400">
+                                            <option value="">— Select Bowling Type —</option>
+                                            <option value="Pace">Pace</option>
+                                            <option value="Spin">Spin</option>
+                                            <option value="None">None</option>
+                                        </select>
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] uppercase font-black text-gray-500 tracking-widest ml-1">Batting Style</label>
+                                        <select name="batting_style" className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none appearance-none cursor-pointer uppercase font-bold text-sm text-purple-300">
+                                            <option value="">— Select Batting Style —</option>
+                                            <option value="Right Handed">Right Handed (RHB)</option>
+                                            <option value="Left Handed">Left Handed (LHB)</option>
+                                        </select>
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] uppercase font-black text-gray-500 tracking-widest ml-1">Bowling Style</label>
+                                        <input name="bowling_style" className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none font-bold text-sm text-gray-300" placeholder="e.g. Right-arm fast" />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] uppercase font-black text-gray-500 tracking-widest ml-1">Market Value (Lakhs)</label>
+                                        <input name="basePrice" type="number" required className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none" placeholder="200" />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] uppercase font-black text-gray-500 tracking-widest ml-1">Asset Visual URL</label>
+                                        <input name="image_path" className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none" placeholder="https://..." />
+                                    </div>
+                                    <div className="col-span-2 grid grid-cols-3 gap-6 pt-4 border-t border-white/5">
+                                        <div className="space-y-2">
+                                            <label className="text-[10px] uppercase font-black text-gray-500 tracking-widest ml-1">Matches Played</label>
+                                            <input name="matches" type="number" className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none" placeholder="0" />
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className="text-[10px] uppercase font-black text-gray-500 tracking-widest ml-1">Total Runs</label>
+                                            <input name="runs" type="number" className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none" placeholder="0" />
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className="text-[10px] uppercase font-black text-gray-500 tracking-widest ml-1">Total Wickets</label>
+                                            <input name="wickets" type="number" className="w-full bg-black/40 border border-white/10 rounded-[1.5rem] px-6 py-4 focus:border-yellow-500/50 outline-none" placeholder="0" />
+                                        </div>
+                                    </div>
                                 </div>
-                                <button type="submit" disabled={isProcessing} className="w-full bg-yellow-500 text-black font-black py-5 rounded-[2rem] shadow-2xl shadow-yellow-500/20 active:scale-95 transition-all text-lg uppercase tracking-widest">
-                                    {isProcessing ? 'INITIALIZING...' : 'CONFIRM DEPLOYMENT'}
+                                <button 
+                                    type="submit" 
+                                    disabled={isProcessing} 
+                                    className={`w-full font-black py-5 rounded-[2rem] shadow-2xl active:scale-95 transition-all text-lg uppercase tracking-widest ${
+                                        userRole === 'editor'
+                                            ? 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white shadow-blue-500/20'
+                                            : 'bg-yellow-500 text-black shadow-yellow-500/20'
+                                    }`}
+                                >
+                                    {isProcessing ? 'PROCESSING...' : userRole === 'editor' ? 'STAGE PLAYER CREATION' : 'CONFIRM DEPLOYMENT'}
                                 </button>
                             </form>
                         </motion.div>
@@ -1413,13 +2017,18 @@ const AdminDashboard = () => {
     );
 };
 
-const NavBtn = ({ active, icon, onClick, label }) => (
+const NavBtn = ({ active, icon, onClick, label, badge }) => (
     <button 
         onClick={onClick}
-        className={`flex flex-col items-center gap-2 p-3 rounded-2xl transition-all group ${
+        className={`relative flex flex-col items-center gap-2 p-3 rounded-2xl transition-all group ${
             active ? 'text-yellow-500 bg-yellow-500/10' : 'text-gray-500 hover:text-white hover:bg-white/5'
         }`}
     >
+        {badge !== null && badge !== undefined && badge > 0 && (
+            <span className="absolute top-1.5 right-1.5 bg-gradient-to-r from-amber-500 to-orange-600 text-black text-[9px] font-black rounded-full w-4 h-4 flex items-center justify-center shadow-lg animate-pulse">
+                {badge}
+            </span>
+        )}
         {icon}
         <span className="text-[8px] uppercase font-black tracking-widest">{label}</span>
     </button>

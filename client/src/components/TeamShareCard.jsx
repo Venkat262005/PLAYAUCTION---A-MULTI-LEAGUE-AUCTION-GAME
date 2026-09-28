@@ -1,4 +1,5 @@
 import React from 'react';
+import { getTeamLogoUrl } from '../utils/teamLogos';
 
 const TeamShareCard = ({ team, allPlayersMap, league = 'ipl' }) => {
     if (!team) return null;
@@ -24,7 +25,7 @@ const TeamShareCard = ({ team, allPlayersMap, league = 'ipl' }) => {
     const starBid     = displayPlayerEntry?.boughtFor;
 
     const themeColor  = team.teamThemeColor || '#1a1a2e';
-    const logoUrl     = team.logoUrl || team.franchiseId?.logoUrl;
+    const logoUrl     = getTeamLogoUrl(team.teamName, league, team.logoUrl || team.franchiseId?.logoUrl);
 
     // ── Team name display (stacked) ───────────────────────────────────────────
     const nameParts   = (team.teamName || '').split(' ');
